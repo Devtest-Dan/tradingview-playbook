@@ -1,0 +1,86 @@
+{
+  "id": "ici-confluence",
+  "name": "ICI Confluence",
+  "author": "dan",
+  "version": "1.0.0",
+  "description": "Impulse-Correction-Impulse strategy. Identifies a structural impulse on a higher TF, waits for price to retrace into a multi-zone confluence area, then enters on the second impulse via POC touch or candlestick confirmation.",
+  "timeframes": {
+    "note": "Flexible — use any two or three TF combination. Impulse on higher TF, correction on mid TF, entry on lower TF. Same TF acceptable if setup is clear.",
+    "examples": [
+      { "impulse": "H4", "correction": "H1", "entry": "M15" },
+      { "impulse": "H1", "correction": "M15", "entry": "M5" },
+      { "impulse": "H1", "correction": "H1", "entry": "H1" }
+    ]
+  },
+  "symbols": "any",
+  "indicators_required": [
+    "SMC Structure v2",
+    "Kernel AO Oscillator",
+    "NWE",
+    "Time Price Opportunity"
+  ],
+  "impulse_conditions": {
+    "description": "Conditions that define a valid Impulse 1",
+    "rules": [
+      {
+        "name": "Structure break",
+        "condition": "CHoCH or BOS confirmed on impulse TF by SMC Structure v2"
+      },
+      {
+        "name": "Momentum confirmation",
+        "condition": "Kernel AO > 0 for bullish impulse | Kernel AO < 0 for bearish impulse on impulse TF"
+      }
+    ]
+  },
+  "correction_conditions": {
+    "description": "Price must retrace into a minimum of 2 confluence zones before entry is considered",
+    "zones": [
+      { "id": "equilibrium", "description": "50% retracement of the impulse range" },
+      { "id": "ote", "description": "61.8%–79% retracement of the impulse range (Optimal Trade Entry)" },
+      { "id": "ob", "description": "Order Block from SMC Structure v2 within the impulse range" },
+      { "id": "fvg", "description": "Fair Value Gap from SMC Structure v2 within the impulse range" },
+      { "id": "nwe_band", "description": "Price touching or beyond the outer NWE band" },
+      { "id": "tpo_poc", "description": "TPO Point of Control within the correction area" }
+    ],
+    "minimum_confluence": 2,
+    "invalidation": "Price closes beyond the origin of Impulse 1 (>100% retracement) before entry — setup is void"
+  },
+  "entry_rules": [
+    {
+      "tier": 1,
+      "name": "POC Touch — Immediate Entry",
+      "priority": "highest probability",
+      "condition": "Price is inside FVG AND touching NWE band AND touches TPO POC",
+      "action": "Enter immediately at POC touch. No candlestick confirmation required.",
+      "direction_long": "All three zones present on bullish correction",
+      "direction_short": "All three zones present on bearish correction"
+    },
+    {
+      "tier": 2,
+      "name": "Candlestick Confirmation Entry",
+      "priority": "standard",
+      "condition": "Price is in 2+ confluence zones but TPO POC not present or not touched",
+      "action": "Wait for a strong reversal candlestick pattern at the zone",
+      "patterns_accepted": [
+        "Bullish/Bearish Engulfing",
+        "Dark Cloud Cover",
+        "Piercing Line",
+        "Hammer / Shooting Star",
+        "Pin Bar",
+        "Morning Star / Evening Star"
+      ]
+    }
+  ],
+  "stop_loss": {
+    "placement": "Beyond the origin of Impulse 1",
+    "description": "Stop is placed just beyond the swing low (long) or swing high (short) that started Impulse 1. A close beyond this level means >100% retracement and full setup invalidation.",
+    "note": "Add a small buffer (e.g. a few pips beyond the wick) to avoid stop hunts"
+  },
+  "take_profit": {
+    "primary": "First FVG beyond the Impulse 1 high (long) or Impulse 1 low (short)",
+    "description": "Target the nearest FVG on the other side of the impulse — this is where price is likely to reach and fill the imbalance",
+    "note": "If no FVG is present beyond the impulse high/low, use the next structural level (prior swing high/low)"
+  },
+  "backtest": null,
+  "notes": "Tier 1 setups (FVG + NWE + POC) are the highest probability. Tier 2 requires patience — wait for the candle to close before entering. Multi-TF alignment strengthens both tiers."
+}
