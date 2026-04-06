@@ -1,0 +1,527 @@
+//@version=6
+indicator("my TPO v1.1", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
+
+// ─── Input Parameters ───────────────────────────────────────────────────────────
+string tf_input       = input.string("D", "Time Period", options = ["4H", "D", "W"])
+float pip_size        = input.float(0.0001, "Pip Size", minval = 0.0000001, step = 0.0001)
+int range_pips        = input.int(5, "Max Time Range (pips)", minval = 1)
+float va_percent      = input.float(70.0, "Value Area Percent", minval = 10.0, maxval = 95.0)
+int num_periods       = input.int(10, "Number of Historical Periods", minval = 1, maxval = 50)
+
+// Colors
+color va_color_input        = input.color(color.new(color.blue, 85), "Value Area Box Color")
+color vah_color_input       = input.color(color.new(#1E90FF, 0), "VAH Line Color")
+color val_color_input       = input.color(color.new(#1E90FF, 0), "VAL Line Color")
+color range_color_input     = input.color(color.new(color.green, 85), "Max Range Color")
+color poc_color_input       = input.color(color.red, "POC Color")
+color virgin_poc_color_input = input.color(color.fuchsia, "Virgin POC Color")
+color ib_color_input        = input.color(color.new(#FFD700, 0), "Initial Balance Color")
+color single_print_color_input = input.color(color.orange, "Single Print Color")
+color dpoc_color_input      = input.color(color.yellow, "Developing POC Color")
+color merged_va_color_input = input.color(color.new(color.purple, 85), "Merged VA Color")
+color poc_zone_color_input  = input.color(color.new(#8B0000, 85), "POC Zone Color")
+
+// Feature Toggles
+bool show_poc_zone       = input.bool(true, "Show POC Zone")
+bool show_vah_val        = input.bool(true, "Show VAH/VAL Lines")
+bool show_initial_balance = input.bool(true, "Show Initial Balance")
+bool show_single_prints  = input.bool(false, "Show Single Prints")
+bool show_excess_poor    = input.bool(true, "Show Excess/Poor Labels")
+bool show_developing_poc = input.bool(false, "Show Developing POC")
+bool show_profile_shape  = input.bool(true, "Show Profile Shape Label")
+bool show_virgin_poc     = input.bool(true, "Show Virgin POCs")
+
+// VA Merge Settings
+bool enable_va_merge        = input.bool(false, "Enable VA Merge")
+float va_merge_threshold    = input.float(50.0, "VA Overlap Threshold (%)", minval = 0.0, maxval = 100.0)
+
+// Initial Balance Settings
+int ib_minutes = input.int(60, "Initial Balance Duration (minutes)", minval = 15)
+
+// Single Print Settings
+float single_print_thresh = input.float(0.5, "Single Print Threshold (TPO count)")
+
+// Excess/Poor Settings
+float excess_threshold = input.float(1.5, "Excess Threshold (max TPO at extreme)")
+float poor_threshold   = input.float(3.0, "Poor Threshold (min TPO for poor structure)")
+
+// POC Zone Settings
+int poc_zone_pips = input.int(5, "POC Zone Width (pips above and below POC)", minval = 0)
+
+// ─── Types ──────────────────────────────────────────────────────────────────────
+type SessionProfile
+    int     start_bar
+    int     end_bar
+    float   va_lower
+    float   va_upper
+    float   poc_price
+    int     min_bin_val
+    int     max_bin_val
+    float   total_time_val
+    array<float> counts_data
+    bool    is_merged
+    int     merge_count
+
+type VirginPOC
+    float   price
+    int     origin_bar   // session end bar where this POC was born
+    bool    is_virgin
+
+type DPOCPoint
+    int     bar_idx
+    float   price
+
+type ProfileState
+    array<float> counts
+    int     min_bin
+    int     max_bin
+    float   total_time
+    int     session_start_bar
+    array<DPOCPoint> dpoc_history
+    int     dpoc_interval
+    int     session_count
+    int     plotted_count
+    array<VirginPOC> virgin_pocs
+
+// ─── Global State ───────────────────────────────────────────────────────────────
+var ProfileState g = ProfileState.new(
+     array.new<float>(0), 999999999, -999999999, 0.0, 0,
+     array.new<DPOCPoint>(0), 0, 0, 0,
+     array.new<VirginPOC>(0))
+
+// Track last N session profiles for deferred plotting
+var array<SessionProfile> g_sessions = array.new<SessionProfile>(0)
+
+get_higher_tf() =>
+    switch tf_input
+        "4H" => "240"
+        "D"  => "D"
+        "W"  => "W"
+        => timeframe.period
+
+get_bin(float p) =>
+    int(math.round(p / pip_size))
+
+// ─── Optimized VA calculation ───────────────────────────────────────────────────
+calc_va(array<float> pc, int pmin, int pmax, float ptotal) =>
+    int nb = pmax - pmin + 1
+    float va_l = 0.0
+    float va_u = 0.0
+    float poc_out = 0.0
+    if nb > 0 and ptotal > 0
+        // POC
+        float mx = 0.0
+        int pb = 0
+        float mid = (pmin + pmax) * pip_size / 2.0
+        for i = 0 to nb - 1
+            float c = array.get(pc, i)
+            if c > mx
+                mx := c
+                pb := i
+            else if c == mx and mx > 0
+                if math.abs((pmin + i) * pip_size - mid) < math.abs((pmin + pb) * pip_size - mid)
+                    pb := i
+        poc_out := (pmin + pb) * pip_size
+        // VA — sliding window O(n)
+        float target = ptotal * (va_percent / 100.0)
+        int best_len = nb
+        int best_start = 0
+        float win_sum = 0.0
+        int left = 0
+        for right = 0 to nb - 1
+            win_sum += array.get(pc, right)
+            while win_sum >= target and left <= right
+                int cur_len = right - left + 1
+                if cur_len < best_len
+                    best_len := cur_len
+                    best_start := left
+                win_sum -= array.get(pc, left)
+                left += 1
+        va_l := (pmin + best_start) * pip_size
+        va_u := (pmin + best_start + best_len) * pip_size
+    [va_l, va_u, poc_out]
+
+calc_va_overlap(float v1l, float v1u, float v2l, float v2u) =>
+    float ol = math.max(v1l, v2l)
+    float ou = math.min(v1u, v2u)
+    if ol >= ou
+        0.0
+    else
+        float sv = math.min(v1u - v1l, v2u - v2l)
+        sv <= 0 ? 0.0 : (ou - ol) / sv * 100.0
+
+detect_profile_shape(array<float> pc, int nb, float pt) =>
+    string shape = "?"
+    if nb >= 10
+        int third = nb / 3
+        float ls = 0.0
+        float ms = 0.0
+        float us = 0.0
+        for i = 0 to third - 1
+            ls += array.get(pc, i)
+        for i = third to 2 * third - 1
+            ms += array.get(pc, i)
+        for i = 2 * third to nb - 1
+            us += array.get(pc, i)
+        float tot = ls + ms + us
+        if tot > 0
+            float lp = ls / tot * 100
+            float mp = ms / tot * 100
+            float up = us / tot * 100
+            int p1b = -1
+            int p2b = -1
+            float p1v = 0.0
+            float p2v = 0.0
+            int half = nb / 2
+            for i = 0 to half - 1
+                float c = array.get(pc, i)
+                if c > p1v
+                    p1v := c
+                    p1b := i
+            for i = half to nb - 1
+                float c = array.get(pc, i)
+                if c > p2v
+                    p2v := c
+                    p2b := i
+            if p1b >= 0 and p2b >= 0 and p2b > p1b
+                float mv = 1e18
+                for i = p1b to p2b
+                    float c = array.get(pc, i)
+                    if c < mv
+                        mv := c
+                float sp = math.min(p1v, p2v)
+                if mv < sp * 0.5 and sp > pt * 0.1
+                    shape := "DD"
+            if shape == "?"
+                if lp > 40 and up < 25
+                    shape := "P"
+                else if up > 40 and lp < 25
+                    shape := "b"
+                else if mp > 35 and math.abs(lp - up) < 15
+                    shape := "D"
+    shape
+
+detect_excess_poor(array<float> pc, int nb) =>
+    bool eh = false
+    bool ph = false
+    bool el = false
+    bool pl = false
+    if nb >= 3
+        float ht = array.get(pc, nb - 1) + array.get(pc, nb - 2)
+        float lt = array.get(pc, 0) + array.get(pc, 1)
+        if ht <= excess_threshold
+            eh := true
+        else if ht >= poor_threshold
+            ph := true
+        if lt <= excess_threshold
+            el := true
+        else if lt >= poor_threshold
+            pl := true
+    [eh, ph, el, pl]
+
+reset_profile(ProfileState st) =>
+    array.clear(st.counts)
+    st.min_bin := 999999999
+    st.max_bin := -999999999
+    st.total_time := 0.0
+    array.clear(st.dpoc_history)
+    st.dpoc_interval := 0
+
+add_bar(ProfileState st, float lp, float hp) =>
+    int lb = get_bin(lp)
+    int hb = get_bin(hp)
+    int num = math.max(1, hb - lb + 1)
+    float inc = 1.0 / num
+    if st.min_bin == 999999999
+        st.min_bin := lb
+        st.max_bin := hb
+        int sz = st.max_bin - st.min_bin + 1
+        array.clear(st.counts)
+        for _i = 0 to sz - 1
+            array.push(st.counts, 0.0)
+    else
+        if lb < st.min_bin
+            int shift = st.min_bin - lb
+            array<float> old = array.copy(st.counts)
+            array.clear(st.counts)
+            for _i = 0 to shift - 1
+                array.push(st.counts, 0.0)
+            for _i = 0 to array.size(old) - 1
+                array.push(st.counts, array.get(old, _i))
+            st.min_bin := lb
+        if hb > st.max_bin
+            int ns = hb - st.min_bin + 1
+            int os = array.size(st.counts)
+            for _i = os to ns - 1
+                array.push(st.counts, 0.0)
+            st.max_bin := hb
+    for b = lb to hb
+        int idx = b - st.min_bin
+        if idx >= 0 and idx < array.size(st.counts)
+            array.set(st.counts, idx, array.get(st.counts, idx) + inc)
+    st.total_time += 1.0
+
+create_session_profile(ProfileState st, int sb, int eb) =>
+    SessionProfile p = SessionProfile.new()
+    p.start_bar := sb
+    p.end_bar := eb
+    p.min_bin_val := st.min_bin
+    p.max_bin_val := st.max_bin
+    p.total_time_val := st.total_time
+    p.is_merged := false
+    p.merge_count := 1
+    p.counts_data := array.copy(st.counts)
+    [vl, vu, pp] = calc_va(p.counts_data, p.min_bin_val, p.max_bin_val, p.total_time_val)
+    p.va_lower := vl
+    p.va_upper := vu
+    p.poc_price := pp
+    p
+
+merge_profiles(SessionProfile p1, SessionProfile p2) =>
+    SessionProfile m = SessionProfile.new()
+    m.start_bar := math.max(p1.start_bar, p2.start_bar)
+    m.end_bar := math.min(p1.end_bar, p2.end_bar)
+    m.is_merged := true
+    m.merge_count := p1.merge_count + p2.merge_count
+    int cmin = math.min(p1.min_bin_val, p2.min_bin_val)
+    int cmax = math.max(p1.max_bin_val, p2.max_bin_val)
+    int csz = cmax - cmin + 1
+    m.min_bin_val := cmin
+    m.max_bin_val := cmax
+    m.total_time_val := p1.total_time_val + p2.total_time_val
+    array<float> mc = array.new<float>(csz, 0.0)
+    for i = 0 to array.size(p1.counts_data) - 1
+        int idx = (p1.min_bin_val + i) - cmin
+        if idx >= 0 and idx < csz
+            array.set(mc, idx, array.get(mc, idx) + array.get(p1.counts_data, i))
+    for i = 0 to array.size(p2.counts_data) - 1
+        int idx = (p2.min_bin_val + i) - cmin
+        if idx >= 0 and idx < csz
+            array.set(mc, idx, array.get(mc, idx) + array.get(p2.counts_data, i))
+    m.counts_data := mc
+    [vl, vu, pp] = calc_va(mc, cmin, cmax, m.total_time_val)
+    m.va_lower := vl
+    m.va_upper := vu
+    m.poc_price := pp
+    m
+
+// ─── Plot a session profile ─────────────────────────────────────────────────────
+plot_session(ProfileState st, SessionProfile prof) =>
+    int sb = prof.start_bar
+    int eb = prof.end_bar
+    float pp = prof.poc_price
+    float vl = prof.va_lower
+    float vu = prof.va_upper
+    int pmn = prof.min_bin_val
+    int pmx = prof.max_bin_val
+    int nb = pmx - pmn + 1
+    color vac = prof.is_merged ? merged_va_color_input : va_color_input
+
+    // POC — just draw the session-width line; virgin extension drawn separately
+    line.new(sb, pp, eb, pp, color = poc_color_input, width = 1)
+
+    // POC Zone
+    if show_poc_zone and poc_zone_pips > 0
+        box.new(sb, pp + poc_zone_pips * pip_size, eb, pp - poc_zone_pips * pip_size,
+             border_color = color.new(poc_zone_color_input, 100), bgcolor = poc_zone_color_input)
+
+    // VAH/VAL
+    if show_vah_val
+        line.new(sb, vu, eb, vu, color = vah_color_input, style = line.style_dashed)
+        line.new(sb, vl, eb, vl, color = val_color_input, style = line.style_dashed)
+
+    // VA box
+    box.new(sb, vu, eb, vl, border_color = color.new(vac, 100), bgcolor = vac)
+
+    // Max range box
+    if nb > range_pips
+        float ms = 0.0
+        int msi = 0
+        // Initial window
+        float ws = 0.0
+        for j = 0 to range_pips - 1
+            ws += array.get(prof.counts_data, j)
+        ms := ws
+        for i = 1 to nb - range_pips
+            ws += array.get(prof.counts_data, i + range_pips - 1) - array.get(prof.counts_data, i - 1)
+            if ws > ms
+                ms := ws
+                msi := i
+        float rl = (pmn + msi) * pip_size
+        box.new(sb, rl + range_pips * pip_size, eb, rl,
+             border_color = color.new(range_color_input, 100), bgcolor = range_color_input)
+
+    // Initial Balance
+    if show_initial_balance and tf_input == "D" and not prof.is_merged
+        int ib_bars = math.max(1, int(ib_minutes / timeframe.in_seconds() * 60))
+        int ib_end = math.max(eb, sb - ib_bars)
+        float ibh = -1e18
+        float ibl = 1e18
+        for i = ib_end to sb
+            int off = bar_index - i
+            if off >= 0
+                float hv = high[off]
+                float lv = low[off]
+                if not na(hv) and hv > ibh
+                    ibh := hv
+                if not na(lv) and lv < ibl
+                    ibl := lv
+        if ibh > -1e18 and ibl < 1e18
+            box.new(sb, ibh, ib_end, ibl, border_color = ib_color_input, border_width = 2,
+                 bgcolor = color.new(ib_color_input, 95))
+            line.new(ib_end, ibh, eb, ibh, color = ib_color_input, style = line.style_dashed)
+            line.new(ib_end, ibl, eb, ibl, color = ib_color_input, style = line.style_dashed)
+
+    // Single Prints
+    if show_single_prints and nb >= 5
+        for i = 2 to nb - 3
+            float cv = array.get(prof.counts_data, i)
+            float nv = (array.get(prof.counts_data, i-1) + array.get(prof.counts_data, i+1)) / 2.0
+            float ov = (array.get(prof.counts_data, i-2) + array.get(prof.counts_data, i+2)) / 2.0
+            if cv <= single_print_thresh and nv > cv * 2 and ov > cv * 2
+                line.new(sb, (pmn + i) * pip_size, eb, (pmn + i) * pip_size,
+                     color = single_print_color_input, style = line.style_dotted)
+
+    // Excess/Poor
+    if show_excess_poor and nb >= 3
+        [eh, ph2, el, pl2] = detect_excess_poor(prof.counts_data, nb)
+        int mb = int((sb + eb) / 2)
+        if eh or ph2
+            label.new(mb, pmx * pip_size + 5 * pip_size, eh ? "Excess" : "Poor",
+                 color = color.new(color.black, 100), textcolor = eh ? color.lime : color.red,
+                 size = size.small, style = label.style_label_down)
+        if el or pl2
+            label.new(mb, pmn * pip_size - 5 * pip_size, el ? "Excess" : "Poor",
+                 color = color.new(color.black, 100), textcolor = el ? color.lime : color.red,
+                 size = size.small, style = label.style_label_up)
+
+    // Shape
+    if show_profile_shape
+        string sh = detect_profile_shape(prof.counts_data, nb, prof.total_time_val)
+        if prof.is_merged and prof.merge_count > 1
+            sh := sh + "(" + str.tostring(prof.merge_count) + ")"
+        label.new(int((sb + eb) / 2), (vu + vl) / 2.0, sh,
+             color = color.new(color.black, 100), textcolor = color.white,
+             size = size.large, style = label.style_label_center)
+
+// ─── Virgin POC: check current bar for touch ────────────────────────────────────
+update_virgin_pocs(ProfileState st) =>
+    if show_virgin_poc
+        int sz = array.size(st.virgin_pocs)
+        if sz > 0
+            float h = high
+            float l = low
+            for i = sz - 1 to 0
+                VirginPOC vp = array.get(st.virgin_pocs, i)
+                if vp.is_virgin and h >= vp.price and l <= vp.price
+                    vp.is_virgin := false
+
+// ─── Draw virgin POC extensions on last bar ─────────────────────────────────────
+draw_virgin_extensions(ProfileState st) =>
+    int sz = array.size(st.virgin_pocs)
+    if sz > 0
+        for i = 0 to sz - 1
+            VirginPOC vp = array.get(st.virgin_pocs, i)
+            if vp.is_virgin
+                // Draw extension line from session end to current bar
+                line.new(vp.origin_bar, vp.price, bar_index, vp.price,
+                     color = virgin_poc_color_input, width = 2, style = line.style_dashed)
+
+record_developing_poc(ProfileState st) =>
+    if show_developing_poc and st.min_bin != 999999999
+        float mx = 0.0
+        int pb = 0
+        int nb = st.max_bin - st.min_bin + 1
+        float mid = (st.min_bin + st.max_bin) * pip_size / 2.0
+        for i = 0 to nb - 1
+            float c = array.get(st.counts, i)
+            if c > mx
+                mx := c
+                pb := i
+            else if c == mx and mx > 0
+                if math.abs((st.min_bin + i) * pip_size - mid) < math.abs((st.min_bin + pb) * pip_size - mid)
+                    pb := i
+        float cp = (st.min_bin + pb) * pip_size
+        int sz = array.size(st.dpoc_history)
+        if sz == 0 or math.abs(array.get(st.dpoc_history, sz - 1).price - cp) > pip_size
+            array.push(st.dpoc_history, DPOCPoint.new(bar_index, cp))
+
+plot_developing_poc(ProfileState st) =>
+    if show_developing_poc
+        int sz = array.size(st.dpoc_history)
+        if sz >= 2
+            for i = 1 to sz - 1
+                DPOCPoint a = array.get(st.dpoc_history, i - 1)
+                DPOCPoint b = array.get(st.dpoc_history, i)
+                line.new(a.bar_idx, a.price, b.bar_idx, b.price,
+                     color = dpoc_color_input, style = line.style_dotted)
+
+// ─── Main Logic ─────────────────────────────────────────────────────────────────
+string htf = get_higher_tf()
+bool is_new_session = timeframe.change(htf)
+
+if barstate.isfirst
+    reset_profile(g)
+    g.session_start_bar := bar_index
+
+if is_new_session and not barstate.isfirst
+    if g.total_time > 0
+        SessionProfile prof = create_session_profile(g, g.session_start_bar, bar_index)
+        array.push(g_sessions, prof)
+        g.session_count += 1
+        // Track virgin POC for this completed session
+        if show_virgin_poc
+            array.push(g.virgin_pocs, VirginPOC.new(prof.poc_price, bar_index, true))
+        // Keep only last num_periods sessions
+        if array.size(g_sessions) > num_periods
+            array.shift(g_sessions)
+        if show_developing_poc
+            plot_developing_poc(g)
+    reset_profile(g)
+    g.session_start_bar := bar_index
+
+add_bar(g, low, high)
+
+g.dpoc_interval += 1
+if g.dpoc_interval >= 6
+    record_developing_poc(g)
+    g.dpoc_interval := 0
+
+update_virgin_pocs(g)
+
+// ─── Draw all kept sessions on last bar only ────────────────────────────────────
+if barstate.islast
+    int total_sess = array.size(g_sessions)
+    if total_sess > 0
+        if enable_va_merge and total_sess > 1
+            array<SessionProfile> to_plot = array.new<SessionProfile>(0)
+            int i = 0
+            while i < total_sess
+                SessionProfile working = array.get(g_sessions, i).copy()
+                int j = i + 1
+                while j < total_sess
+                    SessionProfile ns = array.get(g_sessions, j)
+                    float ov = calc_va_overlap(working.va_lower, working.va_upper, ns.va_lower, ns.va_upper)
+                    if ov >= va_merge_threshold
+                        working := merge_profiles(working, ns)
+                        j += 1
+                    else
+                        break
+                array.push(to_plot, working)
+                i := j
+            for k = 0 to array.size(to_plot) - 1
+                plot_session(g, array.get(to_plot, k))
+        else
+            for k = 0 to total_sess - 1
+                plot_session(g, array.get(g_sessions, k))
+
+    // Virgin POC extensions to current bar
+    if show_virgin_poc
+        draw_virgin_extensions(g)
+
+    // Live session
+    if g.total_time > 0
+        SessionProfile live = create_session_profile(g, g.session_start_bar, bar_index)
+        plot_session(g, live)
+        if show_developing_poc
+            plot_developing_poc(g)
