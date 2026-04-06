@@ -18,6 +18,7 @@ i_va_pct   = input.float(70, "Value Area %", minval=1, maxval=100, group="Profil
 i_ib_n     = input.int(2,    "Initial Balance Blocks", minval=1, maxval=10, group="Profile")
 i_n_sess   = input.int(3,    "Sessions to Show",       minval=1, maxval=5,  group="Profile")
 i_merge    = input.bool(false, "Merge with Previous Session", group="Profile")
+i_nk_max   = input.int(100, "Naked POC Lookback (sessions)", minval=1, maxval=500, group="Profile")
 
 i_poc      = input.bool(true,  "POC Line",              group="Lines")
 i_poc_ext  = input.bool(true,  "Extend POC Right",      group="Lines")
@@ -76,7 +77,7 @@ new_sess = switch i_period
 // STATE
 // ─────────────────────────────────────────────────────────────────────────────
 MAX_R     = 250
-MAX_NAKED = 10
+MAX_NAKED = 500  // hard cap; actual limit controlled by i_nk_max input
 
 var int     s_bar = na
 var int     s_t   = na
@@ -177,7 +178,8 @@ if new_sess and not na(s_bar)
     float nk_p     = array.get(rb, p_ri_nk) + row_sz * 0.5
     int   e_bar_nk = bar_index - 1
 
-    for i = MAX_NAKED - 1 to 1
+    int nk_lim = math.min(i_nk_max, MAX_NAKED)
+    for i = nk_lim - 1 to 1
         array.set(nk_price,   i, array.get(nk_price,   i - 1))
         array.set(nk_s_bar,   i, array.get(nk_s_bar,   i - 1))
         array.set(nk_mit,     i, array.get(nk_mit,     i - 1))
@@ -303,7 +305,8 @@ if not na(s_bar)
             array.set(bv, ri, true)
 
     if i_naked
-        for i = 0 to MAX_NAKED - 1
+        int nk_lim2 = math.min(i_nk_max, MAX_NAKED)
+        for i = 0 to nk_lim2 - 1
             float nkp = array.get(nk_price, i)
             if not na(nkp) and not array.get(nk_mit, i)
                 if high >= nkp and low <= nkp
@@ -429,7 +432,8 @@ if barstate.islast and not na(s_bar)
             line.delete(nl)
         array.clear(nk_lines)
 
-        for i = 0 to MAX_NAKED - 1
+        int nk_lim3 = math.min(i_nk_max, MAX_NAKED)
+        for i = 0 to nk_lim3 - 1
             float nkp   = array.get(nk_price, i)
             int   nk_sb = array.get(nk_s_bar, i)
             if na(nkp) or na(nk_sb)
