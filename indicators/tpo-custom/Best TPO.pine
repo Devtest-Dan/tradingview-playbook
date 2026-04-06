@@ -1,5 +1,5 @@
 //@version=6
-indicator("my TPO v1.1", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
+indicator("my TPO v1.2", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
 
 // ─── Input Parameters ───────────────────────────────────────────────────────────
 string tf_input       = input.string("D", "Time Period", options = ["4H", "D", "W"])
@@ -420,11 +420,12 @@ update_virgin_pocs(ProfileState st) =>
 draw_virgin_extensions(ProfileState st) =>
     int sz = array.size(st.virgin_pocs)
     if sz > 0
+        int max_back = bar_index - 4999  // TradingView drawing limit ~5000 bars
         for i = 0 to sz - 1
             VirginPOC vp = array.get(st.virgin_pocs, i)
             if vp.is_virgin
-                // Draw extension line from session end to current bar
-                line.new(vp.origin_bar, vp.price, bar_index, vp.price,
+                int x1 = math.max(vp.origin_bar, max_back)
+                line.new(x1, vp.price, bar_index, vp.price,
                      color = virgin_poc_color_input, width = 2, style = line.style_dashed)
 
 record_developing_poc(ProfileState st) =>
