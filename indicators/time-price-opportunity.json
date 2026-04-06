@@ -1,0 +1,23 @@
+{
+  "id": "time-price-opportunity",
+  "name": "Time Price Opportunity (TPO)",
+  "author": "third-party",
+  "type": "pinescript",
+  "version": "1.0",
+  "description": "Market profile indicator that shows price distribution over time. Identifies the Point of Control (POC) — the price level with the most time spent — along with Value Area High (VAH) and Value Area Low (VAL). Used to confirm correction zones and entry timing in ICI setups.",
+  "source_file": null,
+  "outputs": [
+    { "name": "POC", "description": "Point of Control — price level with the highest TPO count. Strongest support/resistance in the session." },
+    { "name": "VAH", "description": "Value Area High — upper boundary of the value area (70% of trading activity)." },
+    { "name": "VAL", "description": "Value Area Low — lower boundary of the value area." }
+  ],
+  "reading_guide": {
+    "poc": "POC is the highest probability zone for price reaction. In ICI setups, price touching POC inside a confluence zone triggers a Tier 1 entry.",
+    "value_area": "If price is inside the value area during correction, the move is considered accepted/consolidated. POC touch within value area is the strongest signal.",
+    "poc_magnet": "Price tends to return to POC after deviating — useful for both entry confirmation and TP planning."
+  },
+  "inputs": {
+    "note": "Verify settings on chart. Common inputs: session type (daily/weekly), TPO period, value area percentage (default 70%)"
+  },
+  "used_in_strategies": ["ici-confluence"]
+}

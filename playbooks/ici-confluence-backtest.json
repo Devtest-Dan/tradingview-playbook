@@ -1,0 +1,45 @@
+{
+  "id": "ici-confluence-backtest",
+  "name": "ICI Confluence — Backtest",
+  "author": "dan",
+  "description": "Backtest playbook for the ICI Confluence strategy across 4 forex pairs. Tests both H4→H1→M15 and H1→M15→M5 TF combinations.",
+  "watchlist": "forex-ici",
+  "strategies": ["ici-confluence"],
+  "status": "backtesting",
+  "timeframe_sets": [
+    {
+      "id": "set-a",
+      "impulse": "H4",
+      "correction": "H1",
+      "entry": "M15",
+      "notes": "Longer swing setups — fewer signals, higher RR potential"
+    },
+    {
+      "id": "set-b",
+      "impulse": "H1",
+      "correction": "M15",
+      "entry": "M5",
+      "notes": "Intraday setups — more signals, tighter SL"
+    }
+  ],
+  "backtest_config": {
+    "period_start": "2024-01-01",
+    "period_end": "2025-12-31",
+    "risk_per_trade_pct": 1.0,
+    "min_confluence_zones": 2,
+    "entry_tiers_tested": ["tier1", "tier2"],
+    "record_per_symbol": true
+  },
+  "results": {
+    "note": "Fill in after manual backtest. One entry per symbol per TF set.",
+    "EURUSD_set_a": null,
+    "EURUSD_set_b": null,
+    "GBPUSD_set_a": null,
+    "GBPUSD_set_b": null,
+    "USDJPY_set_a": null,
+    "USDJPY_set_b": null,
+    "GBPJPY_set_a": null,
+    "GBPJPY_set_b": null
+  },
+  "backtest_log": "backtests/ici-confluence-backtest.md"
+}

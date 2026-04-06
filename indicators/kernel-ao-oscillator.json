@@ -1,0 +1,26 @@
+{
+  "id": "kernel-ao-oscillator",
+  "name": "Kernel AO Oscillator",
+  "author": "third-party",
+  "type": "pinescript",
+  "version": "1.0",
+  "description": "Kernel-smoothed Awesome Oscillator. Measures momentum and trend direction using kernel regression to reduce noise. Positive values indicate bullish momentum, negative values bearish momentum.",
+  "source_file": null,
+  "outputs": [
+    {
+      "name": "Current Timeframe Oscillator line",
+      "description": "Main oscillator value. Above 0 = bullish momentum, below 0 = bearish momentum.",
+      "sample_value": "-0.00058"
+    }
+  ],
+  "reading_guide": {
+    "above_zero": "Bullish momentum — valid condition for a bullish Impulse 1 in ICI setups",
+    "below_zero": "Bearish momentum — valid condition for a bearish Impulse 1 in ICI setups",
+    "zero_cross": "Momentum shift — can signal start of a new impulse or end of correction",
+    "divergence": "Price making new high/low while Kernel AO does not — potential reversal warning"
+  },
+  "inputs": {
+    "note": "Verify settings on chart. Common inputs: fast length, slow length, kernel bandwidth"
+  },
+  "used_in_strategies": ["ici-confluence"]
+}

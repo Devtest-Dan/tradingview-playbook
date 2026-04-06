@@ -1,0 +1,12 @@
+{
+  "id": "forex-ici",
+  "name": "Forex ICI Pairs",
+  "author": "dan",
+  "description": "Four major forex pairs selected for ICI Confluence strategy backtesting and live trading.",
+  "symbols": [
+    { "ticker": "OANDA:EURUSD", "label": "EURUSD", "pip_size": 0.0001, "notes": "" },
+    { "ticker": "OANDA:GBPUSD", "label": "GBPUSD", "pip_size": 0.0001, "notes": "" },
+    { "ticker": "OANDA:USDJPY", "label": "USDJPY", "pip_size": 0.01,   "notes": "" },
+    { "ticker": "OANDA:GBPJPY", "label": "GBPJPY", "pip_size": 0.01,   "notes": "Higher volatility — wider stops expected" }
+  ]
+}

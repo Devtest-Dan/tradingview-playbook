@@ -1,0 +1,27 @@
+{
+  "id": "nwe",
+  "name": "Nadaraya-Watson Envelope (NWE)",
+  "author": "third-party",
+  "type": "pinescript",
+  "version": "1.0",
+  "description": "Kernel regression envelope using the Nadaraya-Watson estimator. Plots a smooth price estimate (midline) with three boundary levels above and below. Price at the Far boundary signals overextension; price returning toward the midline signals mean reversion.",
+  "source_file": null,
+  "outputs": [
+    { "name": "Upper Boundary: Far", "description": "Furthest upper band — strong overextension to the upside", "sample_value": "1.16549" },
+    { "name": "Upper Boundary: Average", "description": "Mid upper band", "sample_value": "1.16083" },
+    { "name": "Upper Boundary: Near", "description": "Closest upper band — mild overextension", "sample_value": "1.15617" },
+    { "name": "Nadaraya-Watson Estimation", "description": "Midline / equilibrium — kernel regression of price", "sample_value": "1.15402" },
+    { "name": "Lower Boundary: Near", "description": "Closest lower band — mild overextension to downside", "sample_value": "1.15187" },
+    { "name": "Lower Boundary: Average", "description": "Mid lower band", "sample_value": "1.14721" },
+    { "name": "Lower Boundary: Far", "description": "Furthest lower band — strong overextension to the downside", "sample_value": "1.14255" }
+  ],
+  "reading_guide": {
+    "ici_usage": "In ICI Confluence, 'NWE band' refers to price touching the Average or Far boundary during the correction. Near boundary alone is not sufficient for Tier 1 entry.",
+    "midline": "Nadaraya-Watson Estimation = equilibrium. Price gravitates back toward this after overextension.",
+    "tier1_entry": "Price at Average or Far boundary + inside FVG + touching TPO POC = Tier 1 entry signal"
+  },
+  "inputs": {
+    "note": "Verify settings on chart. Common inputs: bandwidth (h), multiplier for boundary distances"
+  },
+  "used_in_strategies": ["ici-confluence"]
+}

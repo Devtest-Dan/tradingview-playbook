@@ -1,7 +1,7 @@
 {
-  "active_playbook": null,
-  "default_watchlist": null,
+  "active_playbook": "ici-confluence-backtest",
+  "default_watchlist": "forex-ici",
   "bias_timeframe": "H1",
-  "entry_timeframe": "M5",
+  "entry_timeframe": "M15",
   "risk_per_trade_pct": 1.0
 }

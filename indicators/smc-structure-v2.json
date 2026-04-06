@@ -1,0 +1,25 @@
+{
+  "id": "smc-structure-v2",
+  "name": "SMC Structure v2",
+  "author": "third-party",
+  "type": "pinescript",
+  "version": "2.0",
+  "description": "Smart Money Concepts structure indicator. Detects Break of Structure (BOS), Change of Character (CHoCH), Order Blocks (OB), and Fair Value Gaps (FVG). Draws structural levels and imbalance zones directly on the chart.",
+  "source_file": null,
+  "outputs": [
+    "BOS label (bullish/bearish)",
+    "CHoCH label (bullish/bearish)",
+    "Order Block zones (bullish/bearish)",
+    "Fair Value Gap zones (bullish/bearish)"
+  ],
+  "reading_guide": {
+    "BOS": "Break of Structure — continuation signal. Price has broken a prior swing high (bullish BOS) or swing low (bearish BOS).",
+    "CHoCH": "Change of Character — reversal signal. First break against the prevailing structure, indicating potential trend change.",
+    "OB": "Order Block — last opposing candle before a BOS/CHoCH move. Acts as a high-probability support/resistance zone on retest.",
+    "FVG": "Fair Value Gap — candle imbalance zone (3-candle pattern). Price tends to return to fill the gap. Used as a correction target and entry zone in ICI setups."
+  },
+  "inputs": {
+    "note": "Verify settings on chart. Common inputs: swing length, OB validity bars, FVG filter (min size)"
+  },
+  "used_in_strategies": ["ici-confluence"]
+}
