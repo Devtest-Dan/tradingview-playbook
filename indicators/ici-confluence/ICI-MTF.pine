@@ -20,6 +20,7 @@ i_tbl_pos  = input.string("Top Right", "Table Position", options=["Top Right","T
 TF_H4  = "240"
 TF_H1  = "60"
 TF_M15 = "15"
+TF_M5  = "5"
 
 // ════════════════════════════════════════════════════════════════════════════════
 // ENTRY CANDLE DETECTION
@@ -39,26 +40,30 @@ f_entry_candle(bool is_bull) =>
 // ════════════════════════════════════════════════════════════════════════════════
 // CORE TF FUNCTION
 // ════════════════════════════════════════════════════════════════════════════════
-// Full signal chain per set:
+// ── Divergence types ─────────────────────────────────────────────────────────
 //
-//   [L0 Pre]   → A-B-C Wyckoff on IMPULSE TF before CHoCH/BOS
-//   [Impulse 1]→ CHoCH/BOS + KAO 0-line cross  →  bias set
-//   [L0 Corr]  → A-B-C correction on BIAS TF in the pullback after Impulse 1
-//   [Impulse 2]→ T1/T2 entry signal
+//   L0 Pre  (impulse TF, before CHoCH/BOS):
+//     REGULAR divergence — reversal signal:
+//       Bull: price LL + KAO HL (with validated B-wave bounce)
+//       Bear: price HH + KAO LH (with validated B-wave reaction)
+//     Latches into l0_pb/l0_ps at the moment of the structure break.
 //
-//   L0 Pre (impulse TF, e.g. H4 for Set A):
-//     bull_div fires before bull_brk → l0_pb (pre-bull) latches on the break
-//     bear_div fires before bear_brk → l0_ps (pre-bear) latches on the break
+//   L0 Corr (bias/lower TF, pullback after Impulse 1):
+//     HIDDEN divergence — continuation signal (primary):
+//       Bull: correction C > imp_lo (higher low held) AND KAO(C) < KAO(imp_lo)
+//       Bear: correction C < imp_hi (lower high held) AND KAO(C) > KAO(imp_hi)
+//     REGULAR divergence — deep spring fallback (C makes new low, KAO diverges):
+//       Same as L0 Pre logic but checked post-Impulse 1.
+//     Either fires the l0_b/l0_s latch when C also lands at a zone (OB/FVG/NWE).
+//     Reset: structure break on this TF (Impulse 2 confirmed → fresh slate).
 //
-//   L0 Corr (bias TF, e.g. H1 for Set A):
-//     After Impulse 1, correction A-B-C forms in pullback.
-//     C lands at OB/FVG/NWE with KAO divergence → l0_b/l0_s latches.
-//     Resets when Impulse 2 fires (structure break on this TF).
+//   Multi-TF scan for L0 Corr:
+//     Set A checks H1 → M15 → M5 (any confirmation counts).
+//     Set B checks M15 → M5.
 //
-// Returns 16 values:
+// Returns 17 values:
 //   bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nwe_lo, nwe_hi,
 //   poc, atr, eq, ote_lo, ote_hi, l0_pb, l0_ps, l0_b, l0_s
-//   (l0_pb/l0_ps = pre-impulse bull/bear; l0_b/l0_s = correction bull/bear)
 // ════════════════════════════════════════════════════════════════════════════════
 f_tf_data(int sl, int bw, float nm) =>
     float _hl2 = (high + low) * 0.5
@@ -78,7 +83,7 @@ f_tf_data(int sl, int bw, float nm) =>
     var float kao_at_pl  = na
     var float kao_at_pl2 = na
 
-    // ── B-wave trackers ─────────────────────────────────────────────────────────
+    // ── B-wave trackers (for regular divergence / L0 Pre) ────────────────────────
     var float abc_b_bull     = na
     var float abc_b_bear     = na
     var float b_bull         = na
@@ -89,22 +94,22 @@ f_tf_data(int sl, int bw, float nm) =>
     var float capt_orig_lo   = na
 
     // ── Structure / OB / FVG state ───────────────────────────────────────────────
-    var float imp_hi = na
-    var float imp_lo = na
-    var float ob_lo  = na
-    var float ob_hi  = na
-    var float fvg_lo = na
-    var float fvg_hi = na
+    var float imp_hi         = na
+    var float imp_lo         = na
+    var float kao_at_imp_lo  = na   // KAO captured when imp_lo was set (for hidden div)
+    var float kao_at_imp_hi  = na   // KAO captured when imp_hi was set
+    var float ob_lo          = na
+    var float ob_hi          = na
+    var float fvg_lo         = na
+    var float fvg_hi         = na
 
     // ── Layer-0 state ────────────────────────────────────────────────────────────
-    // Pre-impulse: did an ABC fire BEFORE the last CHoCH/BOS on this TF?
-    var bool l0_pre_ok_bull = false   // bull_div seen since last structure break
-    var bool l0_pre_ok_bear = false   // bear_div seen since last structure break
-    var bool l0_pb          = false   // last bull CHoCH was preceded by bull ABC
-    var bool l0_ps          = false   // last bear CHoCH was preceded by bear ABC
-    // Correction: ABC in the pullback AFTER this TF's most recent CHoCH/BOS
-    var bool l0_b           = false   // correction bull ABC confirmed → ready for Impulse 2 long
-    var bool l0_s           = false   // correction bear ABC confirmed → ready for Impulse 2 short
+    var bool l0_pre_ok_bull = false   // regular bull div seen since last structure break
+    var bool l0_pre_ok_bear = false   // regular bear div seen since last structure break
+    var bool l0_pb          = false   // L0 Pre bull confirmed (latched at CHoCH)
+    var bool l0_ps          = false   // L0 Pre bear confirmed
+    var bool l0_b           = false   // L0 Corr bull confirmed (hidden or regular div at zone)
+    var bool l0_s           = false   // L0 Corr bear confirmed
 
     // ── Update pivots + B trackers ───────────────────────────────────────────────
     if not na(ph)
@@ -132,9 +137,11 @@ f_tf_data(int sl, int bw, float nm) =>
     bool bull_brk = not na(last_ph) and close > last_ph and close[1] <= last_ph
     bool bear_brk = not na(last_pl) and close < last_pl and close[1] >= last_pl
 
-    // ── A-B-C KAO Divergence ─────────────────────────────────────────────────────
-    bool bull_div = not na(prev_pl) and not na(last_pl) and last_pl < prev_pl and not na(kao_at_pl) and not na(kao_at_pl2) and kao_at_pl > kao_at_pl2 and not na(b_bull) and b_bull > prev_pl and not na(capt_orig_hi) and b_bull < capt_orig_hi
-    bool bear_div = not na(prev_ph) and not na(last_ph) and last_ph > prev_ph and not na(kao_at_ph) and not na(kao_at_ph2) and kao_at_ph < kao_at_ph2 and not na(b_bear) and b_bear < prev_ph and not na(capt_orig_lo) and b_bear > capt_orig_lo
+    // ── Regular divergence (L0 Pre — reversal, with B-wave) ──────────────────────
+    // Bull: C < A (spring), KAO(C) > KAO(A), B bounced above A, B below origin_hi
+    bool bull_reg_div = not na(prev_pl) and not na(last_pl) and last_pl < prev_pl and not na(kao_at_pl) and not na(kao_at_pl2) and kao_at_pl > kao_at_pl2 and not na(b_bull) and b_bull > prev_pl and not na(capt_orig_hi) and b_bull < capt_orig_hi
+    // Bear: C > A (upthrust), KAO(C) < KAO(A), B reacted below A, B above origin_lo
+    bool bear_reg_div = not na(prev_ph) and not na(last_ph) and last_ph > prev_ph and not na(kao_at_ph) and not na(kao_at_ph2) and kao_at_ph < kao_at_ph2 and not na(b_bear) and b_bear < prev_ph and not na(capt_orig_lo) and b_bear > capt_orig_lo
 
     // ── NWE ──────────────────────────────────────────────────────────────────────
     float atr14 = ta.atr(14)
@@ -146,41 +153,51 @@ f_tf_data(int sl, int bw, float nm) =>
     bool low_in_zone  = not na(last_pl) and ((not na(ob_lo) and last_pl >= ob_lo and last_pl <= ob_hi) or (not na(fvg_lo) and last_pl >= fvg_lo and last_pl <= fvg_hi) or (last_pl >= nlo and last_pl <= nhi))
     bool high_in_zone = not na(last_ph) and ((not na(ob_lo) and last_ph >= ob_lo and last_ph <= ob_hi) or (not na(fvg_lo) and last_ph >= fvg_lo and last_ph <= fvg_hi) or (last_ph >= nlo and last_ph <= nhi))
 
-    // ── Pre-impulse ABC tracker (accumulates until structure break) ───────────────
-    if bull_div
+    // ── Hidden divergence (L0 Corr — continuation vs impulse origin) ─────────────
+    // Bull hidden: correction C holds ABOVE imp_lo (higher low = bullish structure intact)
+    //              KAO at C is BELOW KAO at imp_lo → exhaustion in correction, ready for Imp 2
+    bool bull_hidden_div = bias > 0 and not na(last_pl) and not na(imp_lo) and last_pl > imp_lo and not na(kao_at_pl) and not na(kao_at_imp_lo) and kao_at_pl < kao_at_imp_lo
+    // Bear hidden: correction C holds BELOW imp_hi (lower high = bearish structure intact)
+    //              KAO at C is ABOVE KAO at imp_hi → exhaustion in correction, ready for Imp 2
+    bool bear_hidden_div = bias < 0 and not na(last_ph) and not na(imp_hi) and last_ph < imp_hi and not na(kao_at_ph) and not na(kao_at_imp_hi) and kao_at_ph > kao_at_imp_hi
+
+    // ── L0 Pre: accumulate regular div before structure break ─────────────────────
+    if bull_reg_div
         l0_pre_ok_bull := true
-    if bear_div
+    if bear_reg_div
         l0_pre_ok_bear := true
 
-    // ── Correction ABC latch (fires after Impulse 1, gates Impulse 2) ────────────
-    if bull_div and low_in_zone
+    // ── L0 Corr: hidden div (primary) OR regular div (deep spring fallback) at zone
+    if (bull_hidden_div or bull_reg_div) and low_in_zone
         l0_b := true
-    if bear_div and high_in_zone
+    if (bear_hidden_div or bear_reg_div) and high_in_zone
         l0_s := true
 
     // ── Structure break + Order Block ────────────────────────────────────────────
     if bull_brk
-        imp_hi := last_ph
-        imp_lo := nz(last_pl, low)
-        ob_lo  := na
-        ob_hi  := na
+        imp_hi         := last_ph
+        imp_lo         := nz(last_pl, low)
+        kao_at_imp_lo  := kao_at_pl        // capture KAO at origin for hidden div
+        ob_lo          := na
+        ob_hi          := na
         for i = 1 to 4
             if close[i] < open[i]
                 ob_lo := math.min(open[i], close[i])
                 ob_hi := math.max(open[i], close[i])
                 break
-        l0_pb          := l0_pre_ok_bull   // latch: was bull ABC seen before this break?
-        l0_ps          := false            // new bull impulse clears old bear pre-latch
-        l0_pre_ok_bull := false            // reset for next impulse
+        l0_pb          := l0_pre_ok_bull
+        l0_ps          := false
+        l0_pre_ok_bull := false
         l0_pre_ok_bear := false
         l0_b           := false            // Impulse 2 fired → reset correction tracker
         bias := 1
 
     if bear_brk
-        imp_lo := last_pl
-        imp_hi := nz(last_ph, high)
-        ob_lo  := na
-        ob_hi  := na
+        imp_lo         := last_pl
+        imp_hi         := nz(last_ph, high)
+        kao_at_imp_hi  := kao_at_ph        // capture KAO at origin for hidden div
+        ob_lo          := na
+        ob_hi          := na
         for i = 1 to 4
             if close[i] > open[i]
                 ob_lo := math.min(open[i], close[i])
@@ -227,54 +244,55 @@ f_tf_data(int sl, int bw, float nm) =>
     [bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nlo, nhi, poc, atr14, eq, ote_lo, ote_hi, l0_pb, l0_ps, l0_b, l0_s]
 
 // ════════════════════════════════════════════════════════════════════════════════
-// REQUEST.SECURITY
+// REQUEST.SECURITY  (H4, H1, M15, M5)
 // ════════════════════════════════════════════════════════════════════════════════
 [h4_bias, h4_kao, h4_ob_lo, h4_ob_hi, h4_fvg_lo, h4_fvg_hi, h4_nwe_lo, h4_nwe_hi, h4_poc, h4_atr, h4_eq, h4_ote_lo, h4_ote_hi, h4_l0pb, h4_l0ps, h4_l0b, h4_l0s] = request.security(syminfo.tickerid, TF_H4,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
 [h1_bias, h1_kao, h1_ob_lo, h1_ob_hi, h1_fvg_lo, h1_fvg_hi, h1_nwe_lo, h1_nwe_hi, h1_poc, h1_atr, h1_eq, h1_ote_lo, h1_ote_hi, h1_l0pb, h1_l0ps, h1_l0b, h1_l0s] = request.security(syminfo.tickerid, TF_H1,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
 [m15_bias, m15_kao, m15_ob_lo, m15_ob_hi, m15_fvg_lo, m15_fvg_hi, m15_nwe_lo, m15_nwe_hi, m15_poc, m15_atr, m15_eq, m15_ote_lo, m15_ote_hi, m15_l0pb, m15_l0ps, m15_l0b, m15_l0s] = request.security(syminfo.tickerid, TF_M15, f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[m5_bias,  m5_kao,  m5_ob_lo,  m5_ob_hi,  m5_fvg_lo,  m5_fvg_hi,  m5_nwe_lo,  m5_nwe_hi,  m5_poc,  m5_atr,  m5_eq,  m5_ote_lo,  m5_ote_hi,  m5_l0pb,  m5_l0ps,  m5_l0b,  m5_l0s]  = request.security(syminfo.tickerid, TF_M5,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
 
 // ════════════════════════════════════════════════════════════════════════════════
-// SET A  (H4 impulse / H1 bias+correction / M15 entry)
-//   L0 Pre  → H4 ABC before H4 CHoCH
-//   L0 Corr → H1 ABC correction after H4 CHoCH
+// SET A  (H4 impulse / H1 bias / M15 entry)
+//   L0 Pre  → regular div on H4 before H4 CHoCH
+//   L0 Corr → hidden (or regular) div on H1 OR M15 OR M5 in the pullback
 // ════════════════════════════════════════════════════════════════════════════════
-bool show_a     = i_set != "B (H1/M15/M5)"
-int  a_bias     = h4_bias
-bool a_l0_pre   = a_bias > 0 ? h4_l0pb  : a_bias < 0 ? h4_l0ps  : false
-bool a_l0_corr  = a_bias > 0 ? h1_l0b   : a_bias < 0 ? h1_l0s   : false
-bool a_layer0   = a_l0_pre and a_l0_corr
-bool a_imp_ok   = a_bias != 0 and (a_bias > 0 ? h4_kao > 0 : h4_kao < 0) and (not i_req_l0 or a_layer0)
-bool a_ob       = not na(h1_ob_lo)  and not na(h1_ob_hi)  and close >= h1_ob_lo  and close <= h1_ob_hi
-bool a_fvg      = not na(h1_fvg_lo) and not na(h1_fvg_hi) and close >= h1_fvg_lo and close <= h1_fvg_hi
-bool a_nwe      = a_bias > 0 ? math.abs(close - h1_nwe_lo) <= h1_atr * 0.8 : math.abs(close - h1_nwe_hi) <= h1_atr * 0.8
-bool a_poc      = not na(h1_poc)    and math.abs(close - h1_poc) <= h1_atr * i_poc_tol
-bool a_eq       = not na(h1_eq)     and math.abs(close - h1_eq)  <= h1_atr * i_fib_tol
-bool a_ote      = not na(h1_ote_lo) and not na(h1_ote_hi) and close >= h1_ote_lo and close <= h1_ote_hi
-int  a_score    = (a_ob?1:0) + (a_fvg?1:0) + (a_nwe?1:0) + (a_poc?1:0) + (a_eq?1:0) + (a_ote?1:0)
-bool a_t1       = a_imp_ok and a_fvg and a_nwe and a_poc
-bool a_t2       = a_imp_ok and a_score >= i_min_conf and not a_t1
+bool show_a    = i_set != "B (H1/M15/M5)"
+int  a_bias    = h4_bias
+bool a_l0_pre  = a_bias > 0 ? h4_l0pb : a_bias < 0 ? h4_l0ps : false
+bool a_l0_corr = a_bias > 0 ? (h1_l0b or m15_l0b or m5_l0b) : a_bias < 0 ? (h1_l0s or m15_l0s or m5_l0s) : false
+bool a_layer0  = a_l0_pre and a_l0_corr
+bool a_imp_ok  = a_bias != 0 and (a_bias > 0 ? h4_kao > 0 : h4_kao < 0) and (not i_req_l0 or a_layer0)
+bool a_ob      = not na(h1_ob_lo)  and not na(h1_ob_hi)  and close >= h1_ob_lo  and close <= h1_ob_hi
+bool a_fvg     = not na(h1_fvg_lo) and not na(h1_fvg_hi) and close >= h1_fvg_lo and close <= h1_fvg_hi
+bool a_nwe     = a_bias > 0 ? math.abs(close - h1_nwe_lo) <= h1_atr * 0.8 : math.abs(close - h1_nwe_hi) <= h1_atr * 0.8
+bool a_poc     = not na(h1_poc)    and math.abs(close - h1_poc) <= h1_atr * i_poc_tol
+bool a_eq      = not na(h1_eq)     and math.abs(close - h1_eq)  <= h1_atr * i_fib_tol
+bool a_ote     = not na(h1_ote_lo) and not na(h1_ote_hi) and close >= h1_ote_lo and close <= h1_ote_hi
+int  a_score   = (a_ob?1:0) + (a_fvg?1:0) + (a_nwe?1:0) + (a_poc?1:0) + (a_eq?1:0) + (a_ote?1:0)
+bool a_t1      = a_imp_ok and a_fvg and a_nwe and a_poc
+bool a_t2      = a_imp_ok and a_score >= i_min_conf and not a_t1
 bool a_t2_entry = a_t2 and f_entry_candle(a_bias > 0)
 
 // ════════════════════════════════════════════════════════════════════════════════
-// SET B  (H1 impulse / M15 bias+correction / M5 entry)
-//   L0 Pre  → H1 ABC before H1 CHoCH
-//   L0 Corr → M15 ABC correction after H1 CHoCH
+// SET B  (H1 impulse / M15 bias / M5 entry)
+//   L0 Pre  → regular div on H1 before H1 CHoCH
+//   L0 Corr → hidden (or regular) div on M15 OR M5 in the pullback
 // ════════════════════════════════════════════════════════════════════════════════
-bool show_b     = i_set != "A (H4/H1/M15)"
-int  b_bias     = h1_bias
-bool b_l0_pre   = b_bias > 0 ? h1_l0pb  : b_bias < 0 ? h1_l0ps  : false
-bool b_l0_corr  = b_bias > 0 ? m15_l0b  : b_bias < 0 ? m15_l0s  : false
-bool b_layer0   = b_l0_pre and b_l0_corr
-bool b_imp_ok   = b_bias != 0 and (b_bias > 0 ? h1_kao > 0 : h1_kao < 0) and (not i_req_l0 or b_layer0)
-bool b_ob       = not na(m15_ob_lo)  and not na(m15_ob_hi)  and close >= m15_ob_lo  and close <= m15_ob_hi
-bool b_fvg      = not na(m15_fvg_lo) and not na(m15_fvg_hi) and close >= m15_fvg_lo and close <= m15_fvg_hi
-bool b_nwe      = b_bias > 0 ? math.abs(close - m15_nwe_lo) <= m15_atr * 0.8 : math.abs(close - m15_nwe_hi) <= m15_atr * 0.8
-bool b_poc      = not na(m15_poc)    and math.abs(close - m15_poc) <= m15_atr * i_poc_tol
-bool b_eq       = not na(m15_eq)     and math.abs(close - m15_eq)  <= m15_atr * i_fib_tol
-bool b_ote      = not na(m15_ote_lo) and not na(m15_ote_hi) and close >= m15_ote_lo and close <= m15_ote_hi
-int  b_score    = (b_ob?1:0) + (b_fvg?1:0) + (b_nwe?1:0) + (b_poc?1:0) + (b_eq?1:0) + (b_ote?1:0)
-bool b_t1       = b_imp_ok and b_fvg and b_nwe and b_poc
-bool b_t2       = b_imp_ok and b_score >= i_min_conf and not b_t1
+bool show_b    = i_set != "A (H4/H1/M15)"
+int  b_bias    = h1_bias
+bool b_l0_pre  = b_bias > 0 ? h1_l0pb : b_bias < 0 ? h1_l0ps : false
+bool b_l0_corr = b_bias > 0 ? (m15_l0b or m5_l0b) : b_bias < 0 ? (m15_l0s or m5_l0s) : false
+bool b_layer0  = b_l0_pre and b_l0_corr
+bool b_imp_ok  = b_bias != 0 and (b_bias > 0 ? h1_kao > 0 : h1_kao < 0) and (not i_req_l0 or b_layer0)
+bool b_ob      = not na(m15_ob_lo)  and not na(m15_ob_hi)  and close >= m15_ob_lo  and close <= m15_ob_hi
+bool b_fvg     = not na(m15_fvg_lo) and not na(m15_fvg_hi) and close >= m15_fvg_lo and close <= m15_fvg_hi
+bool b_nwe     = b_bias > 0 ? math.abs(close - m15_nwe_lo) <= m15_atr * 0.8 : math.abs(close - m15_nwe_hi) <= m15_atr * 0.8
+bool b_poc     = not na(m15_poc)    and math.abs(close - m15_poc) <= m15_atr * i_poc_tol
+bool b_eq      = not na(m15_eq)     and math.abs(close - m15_eq)  <= m15_atr * i_fib_tol
+bool b_ote     = not na(m15_ote_lo) and not na(m15_ote_hi) and close >= m15_ote_lo and close <= m15_ote_hi
+int  b_score   = (b_ob?1:0) + (b_fvg?1:0) + (b_nwe?1:0) + (b_poc?1:0) + (b_eq?1:0) + (b_ote?1:0)
+bool b_t1      = b_imp_ok and b_fvg and b_nwe and b_poc
+bool b_t2      = b_imp_ok and b_score >= i_min_conf and not b_t1
 bool b_t2_entry = b_t2 and f_entry_candle(b_bias > 0)
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -320,14 +338,14 @@ if barstate.islast
     cell(3,  0, "Bias",           C_BG,       C_OFF)
     cell(3,  1, _tc(a_bias), _bc(a_bias),     C_TXT)
     cell(3,  2, _tc(b_bias), _bc(b_bias),     C_TXT)
-    // Row 4: L0 Pre — ABC on impulse TF BEFORE the CHoCH/BOS (H4 for A, H1 for B)
-    cell(4,  0, "L0 Pre",                       C_BG, C_OFF)
-    cell(4,  1, a_l0_pre ? "A-B-C" : " - ",    C_BG, a_l0_pre ? C_ON : C_OFF)
-    cell(4,  2, b_l0_pre ? "A-B-C" : " - ",    C_BG, b_l0_pre ? C_ON : C_OFF)
-    // Row 5: L0 Corr — ABC correction on bias TF AFTER the CHoCH/BOS (H1 for A, M15 for B)
-    cell(5,  0, "L0 Corr",                      C_BG, C_OFF)
-    cell(5,  1, a_l0_corr ? "A-B-C" : " - ",   C_BG, a_l0_corr ? C_ON : C_OFF)
-    cell(5,  2, b_l0_corr ? "A-B-C" : " - ",   C_BG, b_l0_corr ? C_ON : C_OFF)
+    // L0 Pre: regular div on impulse TF before CHoCH (H4 for A, H1 for B)
+    cell(4,  0, "L0 Pre",                      C_BG, C_OFF)
+    cell(4,  1, a_l0_pre  ? "Reg Div" : " - ", C_BG, a_l0_pre  ? C_ON : C_OFF)
+    cell(4,  2, b_l0_pre  ? "Reg Div" : " - ", C_BG, b_l0_pre  ? C_ON : C_OFF)
+    // L0 Corr: hidden (or regular) div on H1/M15/M5 in correction (H4 set A, H1 set B)
+    cell(5,  0, "L0 Corr",                     C_BG, C_OFF)
+    cell(5,  1, a_l0_corr ? "Div OK" : " - ",  C_BG, a_l0_corr ? C_ON : C_OFF)
+    cell(5,  2, b_l0_corr ? "Div OK" : " - ",  C_BG, b_l0_corr ? C_ON : C_OFF)
     string _ka = (h4_kao >= 0 ? "+" : "") + str.tostring(math.round(h4_kao * 100000) / 100000)
     string _kb = (h1_kao >= 0 ? "+" : "") + str.tostring(math.round(h1_kao * 100000) / 100000)
     cell(6,  0, "Kernel AO", C_BG, C_OFF)
