@@ -5,6 +5,7 @@ indicator("ICI Confluence MTF", shorttitle="ICI", overlay=true)
 // INPUTS
 // ════════════════════════════════════════════════════════════════════════════════
 i_set      = input.string("Both", "Active Sets", options=["A (H4/H1/M15)","B (H1/M15/M5)","Both"], group="Setup")
+i_req_l0   = input.bool(true, "Require Layer 0 (Wyckoff div + zone)", group="Setup")
 i_swing    = input.int(10,   "Swing Pivot Length",           minval=3,   maxval=20, group="Detection")
 i_nwe_bw   = input.int(8,    "NWE EMA Factor (x4 = length)", minval=1,   maxval=50, group="Detection")
 i_nwe_mult = input.float(3.0,"NWE ATR Multiplier",           minval=0.5, maxval=10, group="Detection")
@@ -37,32 +38,82 @@ f_entry_candle(bool is_bull) =>
 
 // ════════════════════════════════════════════════════════════════════════════════
 // CORE TF FUNCTION
-// Returns: bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nwe_lo, nwe_hi,
-//          poc, atr, eq, ote_lo, ote_hi
+// ════════════════════════════════════════════════════════════════════════════════
+// Layer 0 — Wyckoff divergence filter:
+//   bull_div: price lower low + KAO higher low at pivot → accumulation signal
+//   bear_div: price higher high + KAO lower high at pivot → distribution signal
+//   layer0_confirmed: div fired at same-TF FVG/OB/NWE zone → latches until next break
+//
+// Returns 14 values:
+//   bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nwe_lo, nwe_hi,
+//   poc, atr, eq, ote_lo, ote_hi, layer0_confirmed
 // ════════════════════════════════════════════════════════════════════════════════
 f_tf_data(int sl, int bw, float nm) =>
+    // KAO computed first — needed for divergence pivot tracking
+    float _hl2 = (high + low) * 0.5
+    float kao  = ta.sma(_hl2, 5) - ta.sma(_hl2, 34)
+
     float ph = ta.pivothigh(high, sl, sl)
     float pl = ta.pivotlow(low,   sl, sl)
 
     var int   bias    = 0
     var float last_ph = na
     var float last_pl = na
+    var float prev_ph = na
+    var float prev_pl = na
+    var float kao_at_ph  = na  // KAO value when last_ph pivot formed
+    var float kao_at_ph2 = na  // KAO value when prev_ph pivot formed
+    var float kao_at_pl  = na
+    var float kao_at_pl2 = na
     var float imp_hi  = na
     var float imp_lo  = na
     var float ob_lo   = na
     var float ob_hi   = na
     var float fvg_lo  = na
     var float fvg_hi  = na
+    var bool  layer0_ok        = false  // div+zone seen since last break
+    var bool  layer0_confirmed = false  // latched on break, cleared for next setup
 
+    // Update pivot history + record KAO value at pivot (sl bars ago)
     if not na(ph)
-        last_ph := ph
+        prev_ph    := last_ph
+        kao_at_ph2 := kao_at_ph
+        last_ph    := ph
+        kao_at_ph  := kao[sl]
+
     if not na(pl)
-        last_pl := pl
+        prev_pl    := last_pl
+        kao_at_pl2 := kao_at_pl
+        last_pl    := pl
+        kao_at_pl  := kao[sl]
 
     bool bull_brk = not na(last_ph) and close > last_ph and close[1] <= last_ph
     bool bear_brk = not na(last_pl) and close < last_pl and close[1] >= last_pl
 
-    // Structure break + Order Block
+    // ── KAO Divergence ─────────────────────────────────────────────────────────
+    // Bullish: last low BELOW previous low, but KAO at last low ABOVE KAO at prev low
+    bool bull_div = not na(prev_pl) and not na(last_pl) and last_pl < prev_pl and not na(kao_at_pl) and not na(kao_at_pl2) and kao_at_pl > kao_at_pl2
+    // Bearish: last high ABOVE previous high, but KAO at last high BELOW KAO at prev high
+    bool bear_div = not na(prev_ph) and not na(last_ph) and last_ph > prev_ph and not na(kao_at_ph) and not na(kao_at_ph2) and kao_at_ph < kao_at_ph2
+
+    // ── NWE (needed before zone check below) ───────────────────────────────────
+    float atr14 = ta.atr(14)
+    float nwe_m = ta.ema(close, bw * 4)
+    float nlo   = nwe_m - nm * atr14
+    float nhi   = nwe_m + nm * atr14
+
+    // ── Zone check: was the pivot price level inside a same-TF zone? ───────────
+    // Check the actual price of the diverging pivot against current zone levels.
+    // OB/FVG are persistent price ranges; NWE is approximated at current bar.
+    bool low_in_zone  = not na(last_pl) and ((not na(ob_lo) and last_pl >= ob_lo and last_pl <= ob_hi) or (not na(fvg_lo) and last_pl >= fvg_lo and last_pl <= fvg_hi) or (last_pl >= nlo and last_pl <= nhi))
+    bool high_in_zone = not na(last_ph) and ((not na(ob_lo) and last_ph >= ob_lo and last_ph <= ob_hi) or (not na(fvg_lo) and last_ph >= fvg_lo and last_ph <= fvg_hi) or (last_ph >= nlo and last_ph <= nhi))
+
+    if bull_div and low_in_zone
+        layer0_ok := true
+    if bear_div and high_in_zone
+        layer0_ok := true
+
+    // ── Structure break + Order Block ──────────────────────────────────────────
     if bull_brk
         imp_hi := last_ph
         imp_lo := nz(last_pl, low)
@@ -73,6 +124,8 @@ f_tf_data(int sl, int bw, float nm) =>
                 ob_lo := math.min(open[i], close[i])
                 ob_hi := math.max(open[i], close[i])
                 break
+        layer0_confirmed := layer0_ok  // snapshot: was a Wyckoff div+zone seen before this break?
+        layer0_ok        := false       // reset for next setup
         bias := 1
 
     if bear_brk
@@ -85,6 +138,8 @@ f_tf_data(int sl, int bw, float nm) =>
                 ob_lo := math.min(open[i], close[i])
                 ob_hi := math.max(open[i], close[i])
                 break
+        layer0_confirmed := layer0_ok
+        layer0_ok        := false
         bias := -1
 
     // Invalidate OB on close-through
@@ -95,7 +150,7 @@ f_tf_data(int sl, int bw, float nm) =>
         ob_lo := na
         ob_hi := na
 
-    // Fair Value Gap
+    // ── Fair Value Gap ─────────────────────────────────────────────────────────
     bool bull_fvg = low > high[2] and bias >= 0
     bool bear_fvg = high < low[2] and bias <= 0
     if bull_fvg
@@ -108,20 +163,10 @@ f_tf_data(int sl, int bw, float nm) =>
         fvg_lo := na
         fvg_hi := na
 
-    // Kernel AO (SMA5 - SMA34 of hl2)
-    float _hl2  = (high + low) * 0.5
-    float kao   = ta.sma(_hl2, 5) - ta.sma(_hl2, 34)
+    // ── Session VWAP as POC proxy ──────────────────────────────────────────────
+    float poc = ta.vwap(hlc3)
 
-    // NWE proxy (EMA + ATR envelope)
-    float atr14 = ta.atr(14)
-    float nwe_m = ta.ema(close, bw * 4)
-    float nlo   = nwe_m - nm * atr14
-    float nhi   = nwe_m + nm * atr14
-
-    // Session VWAP as POC proxy
-    float poc   = ta.vwap(hlc3)
-
-    // Fibonacci: EQ (50%) and OTE (61.8-79% retrace)
+    // ── Fibonacci: EQ (50%) and OTE (61.8-79% retrace) ────────────────────────
     float eq     = na
     float ote_lo = na
     float ote_hi = na
@@ -131,21 +176,25 @@ f_tf_data(int sl, int bw, float nm) =>
         ote_lo := bias > 0 ? imp_lo + rng * 0.21  : imp_lo + rng * 0.618
         ote_hi := bias > 0 ? imp_lo + rng * 0.382 : imp_lo + rng * 0.79
 
-    [bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nlo, nhi, poc, atr14, eq, ote_lo, ote_hi]
+    [bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nlo, nhi, poc, atr14, eq, ote_lo, ote_hi, layer0_confirmed]
 
 // ════════════════════════════════════════════════════════════════════════════════
-// REQUEST.SECURITY (single line per call — avoids continuation issues)
+// REQUEST.SECURITY (single line per call)
 // ════════════════════════════════════════════════════════════════════════════════
-[h4_bias, h4_kao, h4_ob_lo, h4_ob_hi, h4_fvg_lo, h4_fvg_hi, h4_nwe_lo, h4_nwe_hi, h4_poc, h4_atr, h4_eq, h4_ote_lo, h4_ote_hi] = request.security(syminfo.tickerid, TF_H4,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
-[h1_bias, h1_kao, h1_ob_lo, h1_ob_hi, h1_fvg_lo, h1_fvg_hi, h1_nwe_lo, h1_nwe_hi, h1_poc, h1_atr, h1_eq, h1_ote_lo, h1_ote_hi] = request.security(syminfo.tickerid, TF_H1,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
-[m15_bias, m15_kao, m15_ob_lo, m15_ob_hi, m15_fvg_lo, m15_fvg_hi, m15_nwe_lo, m15_nwe_hi, m15_poc, m15_atr, m15_eq, m15_ote_lo, m15_ote_hi] = request.security(syminfo.tickerid, TF_M15, f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[h4_bias, h4_kao, h4_ob_lo, h4_ob_hi, h4_fvg_lo, h4_fvg_hi, h4_nwe_lo, h4_nwe_hi, h4_poc, h4_atr, h4_eq, h4_ote_lo, h4_ote_hi, h4_l0] = request.security(syminfo.tickerid, TF_H4,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[h1_bias, h1_kao, h1_ob_lo, h1_ob_hi, h1_fvg_lo, h1_fvg_hi, h1_nwe_lo, h1_nwe_hi, h1_poc, h1_atr, h1_eq, h1_ote_lo, h1_ote_hi, h1_l0] = request.security(syminfo.tickerid, TF_H1,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[m15_bias, m15_kao, m15_ob_lo, m15_ob_hi, m15_fvg_lo, m15_fvg_hi, m15_nwe_lo, m15_nwe_hi, m15_poc, m15_atr, m15_eq, m15_ote_lo, m15_ote_hi, m15_l0] = request.security(syminfo.tickerid, TF_M15, f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
 
 // ════════════════════════════════════════════════════════════════════════════════
 // SET A — H4 impulse / H1 zones
+// Layer 0: H4 KAO div at H4 FVG/OB/NWE (same TF as impulse)
 // ════════════════════════════════════════════════════════════════════════════════
 bool show_a   = i_set != "B (H1/M15/M5)"
 int  a_bias   = h4_bias
-bool a_imp_ok = a_bias != 0 and (a_bias > 0 ? h4_kao > 0 : h4_kao < 0)
+bool a_layer0 = h4_l0
+
+bool a_imp_ok = a_bias != 0 and (a_bias > 0 ? h4_kao > 0 : h4_kao < 0) and (not i_req_l0 or a_layer0)
+
 bool a_ob     = not na(h1_ob_lo)  and not na(h1_ob_hi)  and close >= h1_ob_lo  and close <= h1_ob_hi
 bool a_fvg    = not na(h1_fvg_lo) and not na(h1_fvg_hi) and close >= h1_fvg_lo and close <= h1_fvg_hi
 bool a_nwe    = a_bias > 0 ? math.abs(close - h1_nwe_lo) <= h1_atr * 0.8 : math.abs(close - h1_nwe_hi) <= h1_atr * 0.8
@@ -159,10 +208,19 @@ bool a_t2_entry = a_t2 and f_entry_candle(a_bias > 0)
 
 // ════════════════════════════════════════════════════════════════════════════════
 // SET B — H1 impulse / M15 zones
+// Layer 0: H1 KAO div at H1 FVG/OB/NWE (same TF) OR H4 zone active (higher TF)
 // ════════════════════════════════════════════════════════════════════════════════
 bool show_b   = i_set != "A (H4/H1/M15)"
 int  b_bias   = h1_bias
-bool b_imp_ok = b_bias != 0 and (b_bias > 0 ? h1_kao > 0 : h1_kao < 0)
+
+// Higher-TF zone check: is an H4 zone currently active in Set B's bias direction?
+bool b_h4_ob  = not na(h4_ob_lo)  and not na(h4_ob_hi)  and close >= h4_ob_lo  and close <= h4_ob_hi
+bool b_h4_fvg = not na(h4_fvg_lo) and not na(h4_fvg_hi) and close >= h4_fvg_lo and close <= h4_fvg_hi
+bool b_h4_nwe = b_bias > 0 ? math.abs(close - h4_nwe_lo) <= h4_atr * 0.8 : math.abs(close - h4_nwe_hi) <= h4_atr * 0.8
+bool b_layer0 = h1_l0 or (b_h4_ob or b_h4_fvg or b_h4_nwe)  // same-TF div+zone OR higher-TF zone present
+
+bool b_imp_ok = b_bias != 0 and (b_bias > 0 ? h1_kao > 0 : h1_kao < 0) and (not i_req_l0 or b_layer0)
+
 bool b_ob     = not na(m15_ob_lo)  and not na(m15_ob_hi)  and close >= m15_ob_lo  and close <= m15_ob_hi
 bool b_fvg    = not na(m15_fvg_lo) and not na(m15_fvg_hi) and close >= m15_fvg_lo and close <= m15_fvg_hi
 bool b_nwe    = b_bias > 0 ? math.abs(close - m15_nwe_lo) <= m15_atr * 0.8 : math.abs(close - m15_nwe_hi) <= m15_atr * 0.8
@@ -175,7 +233,7 @@ bool b_t2       = b_imp_ok and b_score >= i_min_conf and not b_t1
 bool b_t2_entry = b_t2 and f_entry_candle(b_bias > 0)
 
 // ════════════════════════════════════════════════════════════════════════════════
-// DASHBOARD TABLE
+// DASHBOARD TABLE  (3 cols × 13 rows)
 // ════════════════════════════════════════════════════════════════════════════════
 _tpos = switch i_tbl_pos
     "Top Left"     => position.top_left
@@ -183,7 +241,7 @@ _tpos = switch i_tbl_pos
     "Bottom Left"  => position.bottom_left
     =>                position.top_right
 
-var table tbl = table.new(_tpos, 3, 12, bgcolor=color.new(color.black,15), border_color=color.new(color.gray,60), border_width=1, frame_color=color.new(color.gray,40), frame_width=1)
+var table tbl = table.new(_tpos, 3, 13, bgcolor=color.new(color.black,15), border_color=color.new(color.gray,60), border_width=1, frame_color=color.new(color.gray,40), frame_width=1)
 
 C_HDR = color.new(#1a1a2e, 0)
 C_BG  = color.new(#0d0d1a, 20)
@@ -205,44 +263,56 @@ _sig_tc(bool t1, bool t2e, bool t2)  => t1 or t2e ? C_ON : t2 ? color.yellow : C
 cell(int r, int c, string txt, color bg, color tc) => table.cell(tbl, c, r, txt, bgcolor=bg, text_color=tc, text_size=size.small, text_halign=text.align_center)
 
 if barstate.islast
+    // Row 0: header
     cell(0, 0, "ICI MTF",    C_HDR, C_TXT)
     cell(0, 1, "SET A",      C_HDR, C_A)
     cell(0, 2, "SET B",      C_HDR, C_B)
+    // Row 1: impulse TF
     cell(1, 0, "Impulse TF", C_BG, C_OFF)
     cell(1, 1, "H4",         C_BG, C_A)
     cell(1, 2, "H1",         C_BG, C_B)
+    // Row 2: bias TF
     cell(2, 0, "Bias TF",    C_BG, C_OFF)
     cell(2, 1, "H1",         C_BG, C_A)
     cell(2, 2, "M15",        C_BG, C_B)
+    // Row 3: bias direction
     cell(3, 0, "Bias",           C_BG,       C_OFF)
     cell(3, 1, _tc(a_bias), _bc(a_bias),     C_TXT)
     cell(3, 2, _tc(b_bias), _bc(b_bias),     C_TXT)
+    // Row 4: Layer 0 — Wyckoff div+zone
+    cell(4, 0, "Layer 0",      C_BG,                             C_OFF)
+    cell(4, 1, _zt(a_layer0),  C_BG, a_layer0 ? C_ON : C_OFF)
+    cell(4, 2, _zt(b_layer0),  C_BG, b_layer0 ? C_ON : C_OFF)
+    // Row 5: Kernel AO
     string _ka = (h4_kao >= 0 ? "+" : "") + str.tostring(math.round(h4_kao * 100000) / 100000)
     string _kb = (h1_kao >= 0 ? "+" : "") + str.tostring(math.round(h1_kao * 100000) / 100000)
-    cell(4, 0, "Kernel AO", C_BG, C_OFF)
-    cell(4, 1, _ka, a_imp_ok ? color.new(color.lime,70) : color.new(color.red,70), C_TXT)
-    cell(4, 2, _kb, b_imp_ok ? color.new(color.lime,70) : color.new(color.red,70), C_TXT)
-    cell(5, 0, "OB",       C_BG, C_OFF)
-    cell(5, 1, _zt(a_ob),  C_BG, _zc(a_ob))
-    cell(5, 2, _zt(b_ob),  C_BG, _zc(b_ob))
-    cell(6, 0, "FVG",      C_BG, C_OFF)
-    cell(6, 1, _zt(a_fvg), C_BG, _zc(a_fvg))
-    cell(6, 2, _zt(b_fvg), C_BG, _zc(b_fvg))
-    cell(7, 0, "NWE",      C_BG, C_OFF)
-    cell(7, 1, _zt(a_nwe), C_BG, _zc(a_nwe))
-    cell(7, 2, _zt(b_nwe), C_BG, _zc(b_nwe))
-    cell(8, 0, "POC",      C_BG, C_OFF)
-    cell(8, 1, _zt(a_poc), C_BG, _zc(a_poc))
-    cell(8, 2, _zt(b_poc), C_BG, _zc(b_poc))
-    cell(9, 0, "EQ/OTE",                  C_BG, C_OFF)
-    cell(9, 1, _zt(a_eq or a_ote),        C_BG, _zc(a_eq or a_ote))
-    cell(9, 2, _zt(b_eq or b_ote),        C_BG, _zc(b_eq or b_ote))
-    cell(10, 0, "Score",  C_BG, C_OFF)
-    cell(10, 1, str.tostring(a_score) + "/6", C_BG, a_score >= 3 ? C_ON : a_score >= 1 ? color.yellow : C_OFF)
-    cell(10, 2, str.tostring(b_score) + "/6", C_BG, b_score >= 3 ? C_ON : b_score >= 1 ? color.yellow : C_OFF)
-    cell(11, 0, "Signal", C_HDR, C_OFF)
-    cell(11, 1, _sig_txt(a_t1,a_t2_entry,a_t2), _sig_bg(a_t1,a_t2_entry,a_t2), _sig_tc(a_t1,a_t2_entry,a_t2))
-    cell(11, 2, _sig_txt(b_t1,b_t2_entry,b_t2), _sig_bg(b_t1,b_t2_entry,b_t2), _sig_tc(b_t1,b_t2_entry,b_t2))
+    cell(5, 0, "Kernel AO", C_BG, C_OFF)
+    cell(5, 1, _ka, a_imp_ok ? color.new(color.lime,70) : color.new(color.red,70), C_TXT)
+    cell(5, 2, _kb, b_imp_ok ? color.new(color.lime,70) : color.new(color.red,70), C_TXT)
+    // Rows 6-10: correction zones
+    cell(6, 0, "OB",       C_BG, C_OFF)
+    cell(6, 1, _zt(a_ob),  C_BG, _zc(a_ob))
+    cell(6, 2, _zt(b_ob),  C_BG, _zc(b_ob))
+    cell(7, 0, "FVG",      C_BG, C_OFF)
+    cell(7, 1, _zt(a_fvg), C_BG, _zc(a_fvg))
+    cell(7, 2, _zt(b_fvg), C_BG, _zc(b_fvg))
+    cell(8, 0, "NWE",      C_BG, C_OFF)
+    cell(8, 1, _zt(a_nwe), C_BG, _zc(a_nwe))
+    cell(8, 2, _zt(b_nwe), C_BG, _zc(b_nwe))
+    cell(9, 0, "POC",      C_BG, C_OFF)
+    cell(9, 1, _zt(a_poc), C_BG, _zc(a_poc))
+    cell(9, 2, _zt(b_poc), C_BG, _zc(b_poc))
+    cell(10, 0, "EQ/OTE",                 C_BG, C_OFF)
+    cell(10, 1, _zt(a_eq or a_ote),       C_BG, _zc(a_eq or a_ote))
+    cell(10, 2, _zt(b_eq or b_ote),       C_BG, _zc(b_eq or b_ote))
+    // Row 11: score
+    cell(11, 0, "Score",  C_BG, C_OFF)
+    cell(11, 1, str.tostring(a_score) + "/6", C_BG, a_score >= 3 ? C_ON : a_score >= 1 ? color.yellow : C_OFF)
+    cell(11, 2, str.tostring(b_score) + "/6", C_BG, b_score >= 3 ? C_ON : b_score >= 1 ? color.yellow : C_OFF)
+    // Row 12: signal
+    cell(12, 0, "Signal", C_HDR, C_OFF)
+    cell(12, 1, _sig_txt(a_t1,a_t2_entry,a_t2), _sig_bg(a_t1,a_t2_entry,a_t2), _sig_tc(a_t1,a_t2_entry,a_t2))
+    cell(12, 2, _sig_txt(b_t1,b_t2_entry,b_t2), _sig_bg(b_t1,b_t2_entry,b_t2), _sig_tc(b_t1,b_t2_entry,b_t2))
 
 // ════════════════════════════════════════════════════════════════════════════════
 // ALERTS
