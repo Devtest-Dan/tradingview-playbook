@@ -39,23 +39,30 @@ f_entry_candle(bool is_bull) =>
 // ════════════════════════════════════════════════════════════════════════════════
 // CORE TF FUNCTION
 // ════════════════════════════════════════════════════════════════════════════════
-// Layer 0 — full A-B-C Wyckoff pattern:
+// Layer 0 — A-B-C Wyckoff correction (tracks the pullback AFTER Impulse 1):
 //
-//   BULL (accumulation):
-//     A = selling climax (prev_pl)
-//     B = automatic rally (highest ph between A and C, below prior origin high)
-//     C = spring/purge (last_pl < A, KAO diverges upward, C at OB/FVG/NWE)
+//   After Impulse 1 (CHoCH/BOS + KAO 0-line cross) sets bias, price enters a
+//   correction phase. This function tracks that correction on the BIAS TF and
+//   confirms when the A-B-C is complete at a zone (ready for Impulse 2).
 //
-//   BEAR (distribution):
-//     A = buying climax (prev_ph)
-//     B = automatic reaction (lowest pl between A and C, above prior origin low)
-//     C = upthrust (last_ph > A, KAO diverges downward, C at OB/FVG/NWE)
+//   BULL correction (after bull impulse):
+//     A = first pivot low in the pullback (selling climax)
+//     B = bounce pivot high above A (automatic rally), below prior swing high
+//     C = lower pivot low (spring/purge) at OB/FVG/NWE, KAO diverging up
+//     → l0_bull latches true → Impulse 2 (long entry) is armed
 //
-//   layer0_confirmed latches true on CHoCH/BOS, resets for next setup.
+//   BEAR correction (after bear impulse):
+//     A = first pivot high in the pullback (buying climax)
+//     B = reaction pivot low below A (automatic reaction), above prior swing low
+//     C = higher pivot high (upthrust) at OB/FVG/NWE, KAO diverging down
+//     → l0_bear latches true → Impulse 2 (short entry) is armed
 //
-// Returns 14 values:
+//   Reset: l0_bull resets on bull structure break (Impulse 2 fired, start fresh).
+//          l0_bear resets on bear structure break.
+//
+// Returns 15 values:
 //   bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nwe_lo, nwe_hi,
-//   poc, atr, eq, ote_lo, ote_hi, layer0_confirmed
+//   poc, atr, eq, ote_lo, ote_hi, l0_bull, l0_bear
 // ════════════════════════════════════════════════════════════════════════════════
 f_tf_data(int sl, int bw, float nm) =>
     float _hl2 = (high + low) * 0.5
@@ -79,9 +86,9 @@ f_tf_data(int sl, int bw, float nm) =>
     // abc_b_bull: running max of all pivot highs between consecutive pl pivots (A → C)
     // abc_b_bear: running min of all pivot lows  between consecutive ph pivots (A → C)
     // b_bull / b_bear: captured B at the moment C fires
-    // origin_hi_bull: last_ph when bull A (prev_pl) formed — B must stay below this
-    // origin_lo_bear: last_pl when bear A (prev_ph) formed — B must stay above this
-    // capt_orig_*: the origin value from the PREVIOUS A, ready for the current div check
+    // origin_hi_bull: last_ph when bull A formed — B must stay below this
+    // origin_lo_bear: last_pl when bear A formed — B must stay above this
+    // capt_orig_*: origin from the PREVIOUS A, available for the current div check
     var float abc_b_bull    = na
     var float abc_b_bear    = na
     var float b_bull        = na
@@ -91,40 +98,34 @@ f_tf_data(int sl, int bw, float nm) =>
     var float capt_orig_hi  = na
     var float capt_orig_lo  = na
 
-    // ── Structure / OB / FVG state ───────────────────────────────────────────────
+    // ── Structure / OB / FVG / Layer-0 state ────────────────────────────────────
     var float imp_hi  = na
     var float imp_lo  = na
     var float ob_lo   = na
     var float ob_hi   = na
     var float fvg_lo  = na
     var float fvg_hi  = na
-    var bool  layer0_ok        = false
-    var bool  layer0_confirmed = false
+    var bool  l0_bull = false   // correction ABC confirmed for bull Impulse 2
+    var bool  l0_bear = false   // correction ABC confirmed for bear Impulse 2
 
     // ── Update pivots + B trackers ───────────────────────────────────────────────
-    // When a new ph fires:
-    //   • update bull B tracker (this ph might be B between two pl pivots)
-    //   • new bear A forming → capture bear B + origin, reset bear B tracker
     if not na(ph)
         abc_b_bull    := na(abc_b_bull) ? ph : math.max(abc_b_bull, ph)
-        capt_orig_lo  := origin_lo_bear   // origin_lo from when prev bear A fired
-        b_bear        := abc_b_bear       // capture B for bear div check
-        abc_b_bear    := na               // reset: new bear A starting
-        origin_lo_bear := last_pl         // origin: swing low in place when this bear A formed
+        capt_orig_lo  := origin_lo_bear
+        b_bear        := abc_b_bear
+        abc_b_bear    := na
+        origin_lo_bear := last_pl
         prev_ph       := last_ph
         kao_at_ph2    := kao_at_ph
         last_ph       := ph
         kao_at_ph     := kao[sl]
 
-    // When a new pl fires:
-    //   • update bear B tracker (this pl might be B between two ph pivots)
-    //   • new bull A forming → capture bull B + origin, reset bull B tracker
     if not na(pl)
         abc_b_bear    := na(abc_b_bear) ? pl : math.min(abc_b_bear, pl)
-        capt_orig_hi  := origin_hi_bull   // origin_hi from when prev bull A fired
-        b_bull        := abc_b_bull       // capture B for bull div check
-        abc_b_bull    := na               // reset: new bull A starting
-        origin_hi_bull := last_ph         // origin: swing high in place when this bull A formed
+        capt_orig_hi  := origin_hi_bull
+        b_bull        := abc_b_bull
+        abc_b_bull    := na
+        origin_hi_bull := last_ph
         prev_pl       := last_pl
         kao_at_pl2    := kao_at_pl
         last_pl       := pl
@@ -133,13 +134,11 @@ f_tf_data(int sl, int bw, float nm) =>
     bool bull_brk = not na(last_ph) and close > last_ph and close[1] <= last_ph
     bool bear_brk = not na(last_pl) and close < last_pl and close[1] >= last_pl
 
-    // ── A-B-C Divergence ─────────────────────────────────────────────────────────
-    // Bull: C < A (purge), KAO(C) > KAO(A) (divergence),
-    //       B existed between A and C, B > A (bounced), B < origin_hi (stayed below structure)
+    // ── A-B-C KAO Divergence ─────────────────────────────────────────────────────
+    // Bull: C < A (spring), KAO(C) > KAO(A), B bounced above A and stayed below origin_hi
     bool bull_div = not na(prev_pl) and not na(last_pl) and last_pl < prev_pl and not na(kao_at_pl) and not na(kao_at_pl2) and kao_at_pl > kao_at_pl2 and not na(b_bull) and b_bull > prev_pl and not na(capt_orig_hi) and b_bull < capt_orig_hi
 
-    // Bear: C > A (upthrust), KAO(C) < KAO(A) (divergence),
-    //       B existed, B < A (reacted), B > origin_lo (stayed above structure)
+    // Bear: C > A (upthrust), KAO(C) < KAO(A), B reacted below A and stayed above origin_lo
     bool bear_div = not na(prev_ph) and not na(last_ph) and last_ph > prev_ph and not na(kao_at_ph) and not na(kao_at_ph2) and kao_at_ph < kao_at_ph2 and not na(b_bear) and b_bear < prev_ph and not na(capt_orig_lo) and b_bear > capt_orig_lo
 
     // ── NWE ──────────────────────────────────────────────────────────────────────
@@ -148,14 +147,16 @@ f_tf_data(int sl, int bw, float nm) =>
     float nlo   = nwe_m - nm * atr14
     float nhi   = nwe_m + nm * atr14
 
-    // ── Zone check: C pivot price must be inside a same-TF zone ──────────────────
+    // ── Zone check: C pivot price inside OB / FVG / NWE ──────────────────────────
     bool low_in_zone  = not na(last_pl) and ((not na(ob_lo) and last_pl >= ob_lo and last_pl <= ob_hi) or (not na(fvg_lo) and last_pl >= fvg_lo and last_pl <= fvg_hi) or (last_pl >= nlo and last_pl <= nhi))
     bool high_in_zone = not na(last_ph) and ((not na(ob_lo) and last_ph >= ob_lo and last_ph <= ob_hi) or (not na(fvg_lo) and last_ph >= fvg_lo and last_ph <= fvg_hi) or (last_ph >= nlo and last_ph <= nhi))
 
+    // ── Layer-0 latch: fires when correction C lands at a zone with KAO divergence ─
+    // Stays latched until the structure breaks in that direction (Impulse 2 completed).
     if bull_div and low_in_zone
-        layer0_ok := true
+        l0_bull := true
     if bear_div and high_in_zone
-        layer0_ok := true
+        l0_bear := true
 
     // ── Structure break + Order Block ────────────────────────────────────────────
     if bull_brk
@@ -168,8 +169,7 @@ f_tf_data(int sl, int bw, float nm) =>
                 ob_lo := math.min(open[i], close[i])
                 ob_hi := math.max(open[i], close[i])
                 break
-        layer0_confirmed := layer0_ok
-        layer0_ok        := false
+        l0_bull := false   // Impulse 2 fired — reset bull correction for next setup
         bias := 1
 
     if bear_brk
@@ -182,8 +182,7 @@ f_tf_data(int sl, int bw, float nm) =>
                 ob_lo := math.min(open[i], close[i])
                 ob_hi := math.max(open[i], close[i])
                 break
-        layer0_confirmed := layer0_ok
-        layer0_ok        := false
+        l0_bear := false   // Impulse 2 fired — reset bear correction for next setup
         bias := -1
 
     if bias > 0 and not na(ob_lo) and low < ob_lo
@@ -217,21 +216,22 @@ f_tf_data(int sl, int bw, float nm) =>
         ote_lo := bias > 0 ? imp_lo + rng * 0.21  : imp_lo + rng * 0.618
         ote_hi := bias > 0 ? imp_lo + rng * 0.382 : imp_lo + rng * 0.79
 
-    [bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nlo, nhi, poc, atr14, eq, ote_lo, ote_hi, layer0_confirmed]
+    [bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nlo, nhi, poc, atr14, eq, ote_lo, ote_hi, l0_bull, l0_bear]
 
 // ════════════════════════════════════════════════════════════════════════════════
 // REQUEST.SECURITY
 // ════════════════════════════════════════════════════════════════════════════════
-[h4_bias, h4_kao, h4_ob_lo, h4_ob_hi, h4_fvg_lo, h4_fvg_hi, h4_nwe_lo, h4_nwe_hi, h4_poc, h4_atr, h4_eq, h4_ote_lo, h4_ote_hi, h4_l0] = request.security(syminfo.tickerid, TF_H4,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
-[h1_bias, h1_kao, h1_ob_lo, h1_ob_hi, h1_fvg_lo, h1_fvg_hi, h1_nwe_lo, h1_nwe_hi, h1_poc, h1_atr, h1_eq, h1_ote_lo, h1_ote_hi, h1_l0] = request.security(syminfo.tickerid, TF_H1,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
-[m15_bias, m15_kao, m15_ob_lo, m15_ob_hi, m15_fvg_lo, m15_fvg_hi, m15_nwe_lo, m15_nwe_hi, m15_poc, m15_atr, m15_eq, m15_ote_lo, m15_ote_hi, m15_l0] = request.security(syminfo.tickerid, TF_M15, f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[h4_bias, h4_kao, h4_ob_lo, h4_ob_hi, h4_fvg_lo, h4_fvg_hi, h4_nwe_lo, h4_nwe_hi, h4_poc, h4_atr, h4_eq, h4_ote_lo, h4_ote_hi, h4_l0b, h4_l0s] = request.security(syminfo.tickerid, TF_H4,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[h1_bias, h1_kao, h1_ob_lo, h1_ob_hi, h1_fvg_lo, h1_fvg_hi, h1_nwe_lo, h1_nwe_hi, h1_poc, h1_atr, h1_eq, h1_ote_lo, h1_ote_hi, h1_l0b, h1_l0s] = request.security(syminfo.tickerid, TF_H1,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[m15_bias, m15_kao, m15_ob_lo, m15_ob_hi, m15_fvg_lo, m15_fvg_hi, m15_nwe_lo, m15_nwe_hi, m15_poc, m15_atr, m15_eq, m15_ote_lo, m15_ote_hi, m15_l0b, m15_l0s] = request.security(syminfo.tickerid, TF_M15, f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
 
 // ════════════════════════════════════════════════════════════════════════════════
-// SET A
+// SET A  (H4 impulse / H1 bias+correction / M15 entry)
+// Layer 0: correction A-B-C tracked on H1 (bias TF), confirming Impulse 2 is ready
 // ════════════════════════════════════════════════════════════════════════════════
 bool show_a   = i_set != "B (H1/M15/M5)"
 int  a_bias   = h4_bias
-bool a_layer0 = h4_l0
+bool a_layer0 = a_bias > 0 ? h1_l0b : a_bias < 0 ? h1_l0s : false
 bool a_imp_ok = a_bias != 0 and (a_bias > 0 ? h4_kao > 0 : h4_kao < 0) and (not i_req_l0 or a_layer0)
 bool a_ob     = not na(h1_ob_lo)  and not na(h1_ob_hi)  and close >= h1_ob_lo  and close <= h1_ob_hi
 bool a_fvg    = not na(h1_fvg_lo) and not na(h1_fvg_hi) and close >= h1_fvg_lo and close <= h1_fvg_hi
@@ -245,14 +245,12 @@ bool a_t2       = a_imp_ok and a_score >= i_min_conf and not a_t1
 bool a_t2_entry = a_t2 and f_entry_candle(a_bias > 0)
 
 // ════════════════════════════════════════════════════════════════════════════════
-// SET B
+// SET B  (H1 impulse / M15 bias+correction / M5 entry)
+// Layer 0: correction A-B-C tracked on M15 (bias TF), confirming Impulse 2 is ready
 // ════════════════════════════════════════════════════════════════════════════════
 bool show_b   = i_set != "A (H4/H1/M15)"
 int  b_bias   = h1_bias
-bool b_h4_ob  = not na(h4_ob_lo)  and not na(h4_ob_hi)  and close >= h4_ob_lo  and close <= h4_ob_hi
-bool b_h4_fvg = not na(h4_fvg_lo) and not na(h4_fvg_hi) and close >= h4_fvg_lo and close <= h4_fvg_hi
-bool b_h4_nwe = b_bias > 0 ? math.abs(close - h4_nwe_lo) <= h4_atr * 0.8 : math.abs(close - h4_nwe_hi) <= h4_atr * 0.8
-bool b_layer0 = h1_l0 or (b_h4_ob or b_h4_fvg or b_h4_nwe)
+bool b_layer0 = b_bias > 0 ? m15_l0b : b_bias < 0 ? m15_l0s : false
 bool b_imp_ok = b_bias != 0 and (b_bias > 0 ? h1_kao > 0 : h1_kao < 0) and (not i_req_l0 or b_layer0)
 bool b_ob     = not na(m15_ob_lo)  and not na(m15_ob_hi)  and close >= m15_ob_lo  and close <= m15_ob_hi
 bool b_fvg    = not na(m15_fvg_lo) and not na(m15_fvg_hi) and close >= m15_fvg_lo and close <= m15_fvg_hi
@@ -308,10 +306,10 @@ if barstate.islast
     cell(3,  0, "Bias",           C_BG,       C_OFF)
     cell(3,  1, _tc(a_bias), _bc(a_bias),     C_TXT)
     cell(3,  2, _tc(b_bias), _bc(b_bias),     C_TXT)
-    // Layer 0: show A-B-C when confirmed, - when not
-    cell(4,  0, "Layer 0",              C_BG, C_OFF)
-    cell(4,  1, a_layer0 ? "A-B-C" : " - ", C_BG, a_layer0 ? C_ON : C_OFF)
-    cell(4,  2, b_layer0 ? "A-B-C" : " - ", C_BG, b_layer0 ? C_ON : C_OFF)
+    // Layer 0: correction A-B-C confirmed on bias TF (H1 for Set A, M15 for Set B)
+    cell(4,  0, "Layer 0",                    C_BG, C_OFF)
+    cell(4,  1, a_layer0 ? "A-B-C" : " - ",  C_BG, a_layer0 ? C_ON : C_OFF)
+    cell(4,  2, b_layer0 ? "A-B-C" : " - ",  C_BG, b_layer0 ? C_ON : C_OFF)
     string _ka = (h4_kao >= 0 ? "+" : "") + str.tostring(math.round(h4_kao * 100000) / 100000)
     string _kb = (h1_kao >= 0 ? "+" : "") + str.tostring(math.round(h1_kao * 100000) / 100000)
     cell(5,  0, "Kernel AO", C_BG, C_OFF)
