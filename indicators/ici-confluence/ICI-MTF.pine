@@ -43,10 +43,9 @@ f_entry_candle(bool is_bull) =>
 // ── Divergence types ─────────────────────────────────────────────────────────
 //
 //   L0 Pre  (impulse TF, before CHoCH/BOS):
-//     REGULAR divergence — reversal signal:
-//       Bull: price LL + KAO HL (with validated B-wave bounce)
-//       Bear: price HH + KAO LH (with validated B-wave reaction)
-//     Latches into l0_pb/l0_ps at the moment of the structure break.
+//     REGULAR divergence — reversal: price LL + KAO HL (spring/climax)
+//     HIDDEN divergence  — breakout:  price HL + KAO LL (price holding up, KAO lagging)
+//     Either latches into l0_pb/l0_ps at the moment of the structure break.
 //
 //   L0 Corr (bias/lower TF, pullback after Impulse 1):
 //     HIDDEN divergence — continuation signal (primary):
@@ -137,11 +136,17 @@ f_tf_data(int sl, int bw, float nm) =>
     bool bull_brk = not na(last_ph) and close > last_ph and close[1] <= last_ph
     bool bear_brk = not na(last_pl) and close < last_pl and close[1] >= last_pl
 
-    // ── Regular divergence (L0 Pre — reversal, with B-wave) ──────────────────────
-    // Bull: C < A (spring), KAO(C) > KAO(A), B bounced above A, B below origin_hi
+    // ── Regular divergence (reversal — L0 Pre + L0 Corr fallback) ──────────────────
+    // Bull: price LL + KAO HL — selling climax / spring
     bool bull_reg_div = not na(prev_pl) and not na(last_pl) and last_pl < prev_pl and not na(kao_at_pl) and not na(kao_at_pl2) and kao_at_pl > kao_at_pl2 and not na(b_bull) and b_bull > prev_pl and not na(capt_orig_hi) and b_bull < capt_orig_hi
-    // Bear: C > A (upthrust), KAO(C) < KAO(A), B reacted below A, B above origin_lo
+    // Bear: price HH + KAO LH — buying climax / upthrust
     bool bear_reg_div = not na(prev_ph) and not na(last_ph) and last_ph > prev_ph and not na(kao_at_ph) and not na(kao_at_ph2) and kao_at_ph < kao_at_ph2 and not na(b_bear) and b_bear < prev_ph and not na(capt_orig_lo) and b_bear > capt_orig_lo
+
+    // ── Hidden divergence pre-impulse (also valid for L0 Pre) ───────────────────────
+    // Bull: price HL + KAO LL — price holding higher lows while KAO weak → imminent breakout
+    bool bull_hidden_pre = not na(prev_pl) and not na(last_pl) and last_pl > prev_pl and not na(kao_at_pl) and not na(kao_at_pl2) and kao_at_pl < kao_at_pl2 and not na(b_bull) and b_bull > prev_pl and not na(capt_orig_hi) and b_bull < capt_orig_hi
+    // Bear: price LH + KAO HH — price making lower highs while KAO strong → imminent breakdown
+    bool bear_hidden_pre = not na(prev_ph) and not na(last_ph) and last_ph < prev_ph and not na(kao_at_ph) and not na(kao_at_ph2) and kao_at_ph > kao_at_ph2 and not na(b_bear) and b_bear < prev_ph and not na(capt_orig_lo) and b_bear > capt_orig_lo
 
     // ── NWE ──────────────────────────────────────────────────────────────────────
     float atr14 = ta.atr(14)
@@ -161,10 +166,10 @@ f_tf_data(int sl, int bw, float nm) =>
     //              KAO at C is ABOVE KAO at imp_hi → exhaustion in correction, ready for Imp 2
     bool bear_hidden_div = bias < 0 and not na(last_ph) and not na(imp_hi) and last_ph < imp_hi and not na(kao_at_ph) and not na(kao_at_imp_hi) and kao_at_ph > kao_at_imp_hi
 
-    // ── L0 Pre: accumulate regular div before structure break ─────────────────────
-    if bull_reg_div
+    // ── L0 Pre: accumulate regular OR hidden div before structure break ──────────────
+    if bull_reg_div or bull_hidden_pre
         l0_pre_ok_bull := true
-    if bear_reg_div
+    if bear_reg_div or bear_hidden_pre
         l0_pre_ok_bear := true
 
     // ── L0 Corr: hidden div (primary) OR regular div (deep spring fallback) at zone
