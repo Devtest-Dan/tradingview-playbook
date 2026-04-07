@@ -1,0 +1,256 @@
+//@version=6
+indicator("ICI Confluence MTF", shorttitle="ICI", overlay=true)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ════════════════════════════════════════════════════════════════════════════════
+i_set      = input.string("Both", "Active Sets", options=["A (H4/H1/M15)","B (H1/M15/M5)","Both"], group="Setup")
+i_swing    = input.int(10,   "Swing Pivot Length",           minval=3,   maxval=20, group="Detection")
+i_nwe_bw   = input.int(8,    "NWE EMA Factor (x4 = length)", minval=1,   maxval=50, group="Detection")
+i_nwe_mult = input.float(3.0,"NWE ATR Multiplier",           minval=0.5, maxval=10, group="Detection")
+i_poc_tol  = input.float(0.3,"POC Tolerance (xATR)",         minval=0.0, maxval=2,  group="Detection")
+i_fib_tol  = input.float(0.5,"Fib Zone Tolerance (xATR)",    minval=0.0, maxval=2,  group="Detection")
+i_min_conf = input.int(2,    "Min Zones for Tier 2",          minval=1,   maxval=6,  group="Detection")
+i_tbl_pos  = input.string("Top Right", "Table Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Display")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIMEFRAMES
+// ════════════════════════════════════════════════════════════════════════════════
+TF_H4  = "240"
+TF_H1  = "60"
+TF_M15 = "15"
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ENTRY CANDLE DETECTION
+// ════════════════════════════════════════════════════════════════════════════════
+f_entry_candle(bool is_bull) =>
+    float body  = math.abs(close - open)
+    float uwick = high - math.max(open, close)
+    float lwick = math.min(open, close) - low
+    bool bull_eng   = is_bull     and close > open and close > open[1] and open < close[1]
+    bool bear_eng   = not is_bull and close < open and close < open[1] and open > close[1]
+    bool bull_rej   = is_bull     and lwick > body * 1.5 and lwick > uwick * 1.5
+    bool bear_rej   = not is_bull and uwick > body * 1.5 and uwick > lwick * 1.5
+    bool piercing   = is_bull     and open < close[1] and close > (open[1] + close[1]) * 0.5 and close > open
+    bool dark_cloud = not is_bull and open > close[1] and close < (open[1] + close[1]) * 0.5 and close < open
+    is_bull ? (bull_eng or bull_rej or piercing) : (bear_eng or bear_rej or dark_cloud)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// CORE TF FUNCTION
+// Returns: bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nwe_lo, nwe_hi,
+//          poc, atr, eq, ote_lo, ote_hi
+// ════════════════════════════════════════════════════════════════════════════════
+f_tf_data(int sl, int bw, float nm) =>
+    float ph = ta.pivothigh(high, sl, sl)
+    float pl = ta.pivotlow(low,   sl, sl)
+
+    var int   bias    = 0
+    var float last_ph = na
+    var float last_pl = na
+    var float imp_hi  = na
+    var float imp_lo  = na
+    var float ob_lo   = na
+    var float ob_hi   = na
+    var float fvg_lo  = na
+    var float fvg_hi  = na
+
+    if not na(ph)
+        last_ph := ph
+    if not na(pl)
+        last_pl := pl
+
+    bool bull_brk = not na(last_ph) and close > last_ph and close[1] <= last_ph
+    bool bear_brk = not na(last_pl) and close < last_pl and close[1] >= last_pl
+
+    // Structure break + Order Block
+    if bull_brk
+        imp_hi := last_ph
+        imp_lo := nz(last_pl, low)
+        ob_lo  := na
+        ob_hi  := na
+        for i = 1 to 4
+            if close[i] < open[i]
+                ob_lo := math.min(open[i], close[i])
+                ob_hi := math.max(open[i], close[i])
+                break
+        bias := 1
+
+    if bear_brk
+        imp_lo := last_pl
+        imp_hi := nz(last_ph, high)
+        ob_lo  := na
+        ob_hi  := na
+        for i = 1 to 4
+            if close[i] > open[i]
+                ob_lo := math.min(open[i], close[i])
+                ob_hi := math.max(open[i], close[i])
+                break
+        bias := -1
+
+    // Invalidate OB on close-through
+    if bias > 0 and not na(ob_lo) and low < ob_lo
+        ob_lo := na
+        ob_hi := na
+    if bias < 0 and not na(ob_hi) and high > ob_hi
+        ob_lo := na
+        ob_hi := na
+
+    // Fair Value Gap
+    bool bull_fvg = low > high[2] and bias >= 0
+    bool bear_fvg = high < low[2] and bias <= 0
+    if bull_fvg
+        fvg_lo := high[2]
+        fvg_hi := low
+    if bear_fvg
+        fvg_lo := high
+        fvg_hi := low[2]
+    if not na(fvg_lo) and not na(fvg_hi) and close > fvg_lo and close < fvg_hi
+        fvg_lo := na
+        fvg_hi := na
+
+    // Kernel AO (SMA5 - SMA34 of hl2)
+    float _hl2  = (high + low) * 0.5
+    float kao   = ta.sma(_hl2, 5) - ta.sma(_hl2, 34)
+
+    // NWE proxy (EMA + ATR envelope)
+    float atr14 = ta.atr(14)
+    float nwe_m = ta.ema(close, bw * 4)
+    float nlo   = nwe_m - nm * atr14
+    float nhi   = nwe_m + nm * atr14
+
+    // Session VWAP as POC proxy
+    float poc   = ta.vwap(hlc3)
+
+    // Fibonacci: EQ (50%) and OTE (61.8-79% retrace)
+    float eq     = na
+    float ote_lo = na
+    float ote_hi = na
+    if not na(imp_hi) and not na(imp_lo) and imp_hi > imp_lo
+        float rng = imp_hi - imp_lo
+        eq     := imp_lo + rng * 0.5
+        ote_lo := bias > 0 ? imp_lo + rng * 0.21  : imp_lo + rng * 0.618
+        ote_hi := bias > 0 ? imp_lo + rng * 0.382 : imp_lo + rng * 0.79
+
+    [bias, kao, ob_lo, ob_hi, fvg_lo, fvg_hi, nlo, nhi, poc, atr14, eq, ote_lo, ote_hi]
+
+// ════════════════════════════════════════════════════════════════════════════════
+// REQUEST.SECURITY (single line per call — avoids continuation issues)
+// ════════════════════════════════════════════════════════════════════════════════
+[h4_bias, h4_kao, h4_ob_lo, h4_ob_hi, h4_fvg_lo, h4_fvg_hi, h4_nwe_lo, h4_nwe_hi, h4_poc, h4_atr, h4_eq, h4_ote_lo, h4_ote_hi] = request.security(syminfo.tickerid, TF_H4,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[h1_bias, h1_kao, h1_ob_lo, h1_ob_hi, h1_fvg_lo, h1_fvg_hi, h1_nwe_lo, h1_nwe_hi, h1_poc, h1_atr, h1_eq, h1_ote_lo, h1_ote_hi] = request.security(syminfo.tickerid, TF_H1,  f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+[m15_bias, m15_kao, m15_ob_lo, m15_ob_hi, m15_fvg_lo, m15_fvg_hi, m15_nwe_lo, m15_nwe_hi, m15_poc, m15_atr, m15_eq, m15_ote_lo, m15_ote_hi] = request.security(syminfo.tickerid, TF_M15, f_tf_data(i_swing, i_nwe_bw, i_nwe_mult), lookahead=barmerge.lookahead_off)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SET A — H4 impulse / H1 zones
+// ════════════════════════════════════════════════════════════════════════════════
+bool show_a   = i_set != "B (H1/M15/M5)"
+int  a_bias   = h4_bias
+bool a_imp_ok = a_bias != 0 and (a_bias > 0 ? h4_kao > 0 : h4_kao < 0)
+bool a_ob     = not na(h1_ob_lo)  and not na(h1_ob_hi)  and close >= h1_ob_lo  and close <= h1_ob_hi
+bool a_fvg    = not na(h1_fvg_lo) and not na(h1_fvg_hi) and close >= h1_fvg_lo and close <= h1_fvg_hi
+bool a_nwe    = a_bias > 0 ? math.abs(close - h1_nwe_lo) <= h1_atr * 0.8 : math.abs(close - h1_nwe_hi) <= h1_atr * 0.8
+bool a_poc    = not na(h1_poc)    and math.abs(close - h1_poc) <= h1_atr * i_poc_tol
+bool a_eq     = not na(h1_eq)     and math.abs(close - h1_eq)  <= h1_atr * i_fib_tol
+bool a_ote    = not na(h1_ote_lo) and not na(h1_ote_hi) and close >= h1_ote_lo and close <= h1_ote_hi
+int  a_score    = (a_ob?1:0) + (a_fvg?1:0) + (a_nwe?1:0) + (a_poc?1:0) + (a_eq?1:0) + (a_ote?1:0)
+bool a_t1       = a_imp_ok and a_fvg and a_nwe and a_poc
+bool a_t2       = a_imp_ok and a_score >= i_min_conf and not a_t1
+bool a_t2_entry = a_t2 and f_entry_candle(a_bias > 0)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SET B — H1 impulse / M15 zones
+// ════════════════════════════════════════════════════════════════════════════════
+bool show_b   = i_set != "A (H4/H1/M15)"
+int  b_bias   = h1_bias
+bool b_imp_ok = b_bias != 0 and (b_bias > 0 ? h1_kao > 0 : h1_kao < 0)
+bool b_ob     = not na(m15_ob_lo)  and not na(m15_ob_hi)  and close >= m15_ob_lo  and close <= m15_ob_hi
+bool b_fvg    = not na(m15_fvg_lo) and not na(m15_fvg_hi) and close >= m15_fvg_lo and close <= m15_fvg_hi
+bool b_nwe    = b_bias > 0 ? math.abs(close - m15_nwe_lo) <= m15_atr * 0.8 : math.abs(close - m15_nwe_hi) <= m15_atr * 0.8
+bool b_poc    = not na(m15_poc)    and math.abs(close - m15_poc) <= m15_atr * i_poc_tol
+bool b_eq     = not na(m15_eq)     and math.abs(close - m15_eq)  <= m15_atr * i_fib_tol
+bool b_ote    = not na(m15_ote_lo) and not na(m15_ote_hi) and close >= m15_ote_lo and close <= m15_ote_hi
+int  b_score    = (b_ob?1:0) + (b_fvg?1:0) + (b_nwe?1:0) + (b_poc?1:0) + (b_eq?1:0) + (b_ote?1:0)
+bool b_t1       = b_imp_ok and b_fvg and b_nwe and b_poc
+bool b_t2       = b_imp_ok and b_score >= i_min_conf and not b_t1
+bool b_t2_entry = b_t2 and f_entry_candle(b_bias > 0)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// DASHBOARD TABLE
+// ════════════════════════════════════════════════════════════════════════════════
+_tpos = switch i_tbl_pos
+    "Top Left"     => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left"  => position.bottom_left
+    =>                position.top_right
+
+var table tbl = table.new(_tpos, 3, 12, bgcolor=color.new(color.black,15), border_color=color.new(color.gray,60), border_width=1, frame_color=color.new(color.gray,40), frame_width=1)
+
+C_HDR = color.new(#1a1a2e, 0)
+C_BG  = color.new(#0d0d1a, 20)
+C_A   = color.new(#7EB8F7, 0)
+C_B   = color.new(#FFD700, 0)
+C_ON  = color.new(color.lime, 0)
+C_OFF = color.new(color.gray, 50)
+C_TXT = color.white
+
+_bc(int b)  => b > 0 ? color.new(color.lime,40) : b < 0 ? color.new(color.red,40) : C_BG
+_tc(int b)  => b > 0 ? "Bull" : b < 0 ? "Bear" : "Flat"
+_zc(bool v) => v ? C_ON : C_OFF
+_zt(bool v) => v ? "YES" : " - "
+
+_sig_txt(bool t1, bool t2e, bool t2) => t1 ? "TIER 1 ENTER" : t2e ? "TIER 2 ENTER" : t2 ? "TIER 2 WAIT" : "  -  "
+_sig_bg(bool t1, bool t2e, bool t2)  => t1 ? color.new(color.lime,50) : t2e ? color.new(color.lime,70) : t2 ? color.new(color.yellow,70) : C_HDR
+_sig_tc(bool t1, bool t2e, bool t2)  => t1 or t2e ? C_ON : t2 ? color.yellow : C_OFF
+
+cell(int r, int c, string txt, color bg, color tc) => table.cell(tbl, c, r, txt, bgcolor=bg, text_color=tc, text_size=size.small, text_halign=text.align_center)
+
+if barstate.islast
+    cell(0, 0, "ICI MTF",    C_HDR, C_TXT)
+    cell(0, 1, "SET A",      C_HDR, C_A)
+    cell(0, 2, "SET B",      C_HDR, C_B)
+    cell(1, 0, "Impulse TF", C_BG, C_OFF)
+    cell(1, 1, "H4",         C_BG, C_A)
+    cell(1, 2, "H1",         C_BG, C_B)
+    cell(2, 0, "Bias TF",    C_BG, C_OFF)
+    cell(2, 1, "H1",         C_BG, C_A)
+    cell(2, 2, "M15",        C_BG, C_B)
+    cell(3, 0, "Bias",           C_BG,       C_OFF)
+    cell(3, 1, _tc(a_bias), _bc(a_bias),     C_TXT)
+    cell(3, 2, _tc(b_bias), _bc(b_bias),     C_TXT)
+    string _ka = (h4_kao >= 0 ? "+" : "") + str.tostring(math.round(h4_kao * 100000) / 100000)
+    string _kb = (h1_kao >= 0 ? "+" : "") + str.tostring(math.round(h1_kao * 100000) / 100000)
+    cell(4, 0, "Kernel AO", C_BG, C_OFF)
+    cell(4, 1, _ka, a_imp_ok ? color.new(color.lime,70) : color.new(color.red,70), C_TXT)
+    cell(4, 2, _kb, b_imp_ok ? color.new(color.lime,70) : color.new(color.red,70), C_TXT)
+    cell(5, 0, "OB",       C_BG, C_OFF)
+    cell(5, 1, _zt(a_ob),  C_BG, _zc(a_ob))
+    cell(5, 2, _zt(b_ob),  C_BG, _zc(b_ob))
+    cell(6, 0, "FVG",      C_BG, C_OFF)
+    cell(6, 1, _zt(a_fvg), C_BG, _zc(a_fvg))
+    cell(6, 2, _zt(b_fvg), C_BG, _zc(b_fvg))
+    cell(7, 0, "NWE",      C_BG, C_OFF)
+    cell(7, 1, _zt(a_nwe), C_BG, _zc(a_nwe))
+    cell(7, 2, _zt(b_nwe), C_BG, _zc(b_nwe))
+    cell(8, 0, "POC",      C_BG, C_OFF)
+    cell(8, 1, _zt(a_poc), C_BG, _zc(a_poc))
+    cell(8, 2, _zt(b_poc), C_BG, _zc(b_poc))
+    cell(9, 0, "EQ/OTE",                  C_BG, C_OFF)
+    cell(9, 1, _zt(a_eq or a_ote),        C_BG, _zc(a_eq or a_ote))
+    cell(9, 2, _zt(b_eq or b_ote),        C_BG, _zc(b_eq or b_ote))
+    cell(10, 0, "Score",  C_BG, C_OFF)
+    cell(10, 1, str.tostring(a_score) + "/6", C_BG, a_score >= 3 ? C_ON : a_score >= 1 ? color.yellow : C_OFF)
+    cell(10, 2, str.tostring(b_score) + "/6", C_BG, b_score >= 3 ? C_ON : b_score >= 1 ? color.yellow : C_OFF)
+    cell(11, 0, "Signal", C_HDR, C_OFF)
+    cell(11, 1, _sig_txt(a_t1,a_t2_entry,a_t2), _sig_bg(a_t1,a_t2_entry,a_t2), _sig_tc(a_t1,a_t2_entry,a_t2))
+    cell(11, 2, _sig_txt(b_t1,b_t2_entry,b_t2), _sig_bg(b_t1,b_t2_entry,b_t2), _sig_tc(b_t1,b_t2_entry,b_t2))
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ════════════════════════════════════════════════════════════════════════════════
+alertcondition(show_a and a_t1,       title="Set A - Tier 1 Entry",             message="ICI Set A TIER 1 ENTRY - {{ticker}} @ {{close}}")
+alertcondition(show_a and a_t2_entry, title="Set A - Tier 2 Entry (confirmed)", message="ICI Set A TIER 2 ENTRY - {{ticker}} @ {{close}}")
+alertcondition(show_a and a_t2,       title="Set A - Tier 2 Zone Active",       message="ICI Set A: Tier 2 zone active, awaiting candle - {{ticker}} @ {{close}}")
+alertcondition(show_b and b_t1,       title="Set B - Tier 1 Entry",             message="ICI Set B TIER 1 ENTRY - {{ticker}} @ {{close}}")
+alertcondition(show_b and b_t2_entry, title="Set B - Tier 2 Entry (confirmed)", message="ICI Set B TIER 2 ENTRY - {{ticker}} @ {{close}}")
+alertcondition(show_b and b_t2,       title="Set B - Tier 2 Zone Active",       message="ICI Set B: Tier 2 zone active, awaiting candle - {{ticker}} @ {{close}}")
+alertcondition((show_a and a_t1) or (show_b and b_t1), title="Either Set - Tier 1 Entry", message="ICI TIER 1 ENTRY - {{ticker}} @ {{close}}")
